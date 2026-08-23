@@ -314,11 +314,15 @@ final class RepositoryStore: ObservableObject {
     // (500/page, page 1 sequentially since it also carries the category
     // ranking, the rest concurrently).
 
-    private static let pagedAppsBaseURL = "https://dev.ceresify.com/api/apps/paged"
-    private static let pagedAppsPageSize = 500
+    // Plain Sendable constants, but the enclosing type is @MainActor, which
+    // isolates static members by default too — nonisolated so the paging
+    // helpers below (also nonisolated, to run their network I/O concurrently)
+    // can read them without hopping back to the main actor.
+    private nonisolated static let pagedAppsBaseURL = "https://dev.ceresify.com/api/apps/paged"
+    private nonisolated static let pagedAppsPageSize = 500
     /// Safety cap on pages fetched per request — comfortably above the whole
     /// catalog's current size (~8,500 apps ≈ 18 pages) without an unbounded loop.
-    private static let pagedAppsMaxPages = 40
+    private nonisolated static let pagedAppsMaxPages = 40
 
     private struct PagedCatalogPage: Decodable {
         struct CategoryEntry: Decodable { let originalName: String? }
