@@ -18,6 +18,17 @@ struct AppsView: View {
         }
     }
 
+    /// True while the store catalog is being fetched and nothing has loaded yet.
+    private var isLoadingCatalog: Bool {
+        repositories.loadingRepoID != nil && allApps.isEmpty
+    }
+
+    /// The most recent fetch failure, if the catalog never loaded.
+    private var catalogErrorMessage: String? {
+        guard allApps.isEmpty else { return nil }
+        return repositories.repositories.compactMap { repositories.fetchError[$0.id] }.first
+    }
+
     private func refreshDisplayedApps() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
@@ -38,7 +49,13 @@ struct AppsView: View {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                         Section {
                             if displayedApps.isEmpty {
-                                emptyState
+                                if isLoadingCatalog {
+                                    loadingState
+                                } else if let catalogErrorMessage {
+                                    errorState(catalogErrorMessage)
+                                } else {
+                                    emptyState
+                                }
                             } else {
                                 // Do not nest a LazyVStack inside the section's
                                 // lazy container: nested lazy layout can preserve
@@ -248,7 +265,61 @@ struct AppsView: View {
             Text(languageCode == AppLanguage.arabic.rawValue ? "لا توجد تطبيقات بعد" : "No apps yet")
                 .font(T.sans(15, .medium))
                 .foregroundColor(T.ink)
-            MonoText(text: languageCode == AppLanguage.arabic.rawValue ? "أضف مصدراً من تبويب التوقيع لاكتشاف التطبيقات هنا." : "Add a source from the Sign tab to discover apps here.", size: 10, color: T.ink3)
+            MonoText(text: languageCode == AppLanguage.arabic.rawValue ? "لم يرسل المتجر أي تطبيقات حالياً." : "The store didn't return any apps right now.", size: 10, color: T.ink3)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .padding(.horizontal, T.pad)
+        .fGlass(cornerRadius: 16)
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(T.rule, lineWidth: AppStroke.hairline)
+        }
+        .padding(.horizontal, T.pad)
+        .padding(.top, 24)
+    }
+
+    private var loadingState: some View {
+        VStack(spacing: T.gap) {
+            ProgressView()
+                .tint(T.ink3)
+            Text(languageCode == AppLanguage.arabic.rawValue ? "جارِ تحميل المتجر…" : "Loading the store…")
+                .font(T.sans(15, .medium))
+                .foregroundColor(T.ink)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .padding(.horizontal, T.pad)
+        .fGlass(cornerRadius: 16)
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(T.rule, lineWidth: AppStroke.hairline)
+        }
+        .padding(.horizontal, T.pad)
+        .padding(.top, 24)
+    }
+
+    private func errorState(_ message: String) -> some View {
+        VStack(spacing: T.gap) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 20))
+                .foregroundColor(T.ink3)
+            Text(languageCode == AppLanguage.arabic.rawValue ? "تعذر تحميل المتجر" : "Couldn't load the store")
+                .font(T.sans(15, .medium))
+                .foregroundColor(T.ink)
+            MonoText(text: message, size: 10, color: T.ink3)
+            Button {
+                Task {
+                    await refreshAll()
+                    refreshDisplayedApps()
+                }
+            } label: {
+                Text(languageCode == AppLanguage.arabic.rawValue ? "إعادة المحاولة" : "Retry")
+                    .font(T.sans(13, .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(T.accent)
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 28)
