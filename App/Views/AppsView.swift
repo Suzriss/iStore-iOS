@@ -19,20 +19,17 @@ struct AppsView: View {
         }
     }
 
-    /// Categories ranked the same way the Ceresify catalog itself ranks them:
-    /// by how many packages/apps each one holds, largest first. Ties fall back
-    /// to first-seen order so the ranking stays stable between refreshes.
+    /// Categories in the order the Ceresify API itself returns them — the
+    /// order each category first appears while walking the `apps` array.
     private var categories: [String] {
-        var counts: [String: Int] = [:]
-        var firstSeenOrder: [String] = []
+        var seen = Set<String>()
+        var ordered: [String] = []
         for app in allApps {
             guard let category = app.category?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !category.isEmpty else { continue }
-            if counts[category] == nil { firstSeenOrder.append(category) }
-            counts[category, default: 0] += 1
+                  !category.isEmpty, seen.insert(category).inserted else { continue }
+            ordered.append(category)
         }
-        // `sorted` is stable, so equal counts keep their first-seen order.
-        return firstSeenOrder.sorted { (counts[$0] ?? 0) > (counts[$1] ?? 0) }
+        return ordered
     }
 
     /// True while the store catalog is being fetched and nothing has loaded yet.
