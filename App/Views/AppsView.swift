@@ -19,17 +19,24 @@ struct AppsView: View {
         }
     }
 
-    /// Categories in the order the Ceresify API itself returns them — the
-    /// order each category first appears while walking the `apps` array.
+    /// Categories that currently have apps, ranked by Ceresify's own admin
+    /// panel order (`repositories.categoryOrder`). Any category present in
+    /// the catalog but missing from that ranking — e.g. brand new, not yet
+    /// filed in the admin panel — falls back to the end, first-seen first.
     private var categories: [String] {
         var seen = Set<String>()
-        var ordered: [String] = []
+        var present: [String] = []
         for app in allApps {
             guard let category = app.category?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !category.isEmpty, seen.insert(category).inserted else { continue }
-            ordered.append(category)
+            present.append(category)
         }
-        return ordered
+        let order = repositories.categoryOrder
+        guard !order.isEmpty else { return present }
+        // `uniquingKeysWith` guards against a duplicate name in the server's
+        // ranking ever crashing this instead of just picking one rank for it.
+        let rank = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        return present.sorted { (rank[$0] ?? Int.max) < (rank[$1] ?? Int.max) }
     }
 
     /// True while the store catalog is being fetched and nothing has loaded yet.
@@ -179,6 +186,9 @@ struct AppsView: View {
                 group.addTask {
                     await repositories.refresh(repo)
                 }
+            }
+            group.addTask {
+                await repositories.refreshCategoryOrder()
             }
         }
     }

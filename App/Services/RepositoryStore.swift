@@ -228,6 +228,11 @@ final class RepositoryStore: ObservableObject {
     @Published var fetchError: [UUID: String] = [:]
     @Published var loadingRepoID: UUID?
 
+    /// Category names in the order Ceresify's own admin panel ranks them
+    /// (its `CategoryOverride.order` field) — not derivable from the catalog
+    /// feed itself. Empty until `refreshCategoryOrder()` succeeds at least once.
+    @Published private(set) var categoryOrder: [String] = []
+
     /// Bundle id of the app currently downloading, if any.
     @Published var activeDownloadID: String?
     /// Remains active from GET through signing and the iOS install handoff.
@@ -247,6 +252,7 @@ final class RepositoryStore: ObservableObject {
 
     private let indexURL: URL
     private let cacheURL: URL
+    private let categoryOrderCacheURL: URL
     private let downloadsDir: URL
     private var installWatchdogTask: Task<Void, Never>?
 
@@ -256,6 +262,7 @@ final class RepositoryStore: ObservableObject {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         indexURL = base.appendingPathComponent("repositories.json")
         cacheURL = base.appendingPathComponent("repository-catalog-cache.json")
+        categoryOrderCacheURL = base.appendingPathComponent("category-order-cache.json")
         downloadsDir = base.appendingPathComponent("Downloads", isDirectory: true)
         try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
         installedAppIDs = Set(UserDefaults.standard.stringArray(forKey: "istore.installed-app-ids") ?? [])
@@ -263,6 +270,7 @@ final class RepositoryStore: ObservableObject {
         seedCeresifyRepository()
         Task { @MainActor [weak self] in
             await self?.loadCatalogCache()
+            await self?.loadCategoryOrderCache()
         }
         #if DEBUG
         RepoSource._selfTest()
@@ -287,6 +295,14 @@ final class RepositoryStore: ObservableObject {
         fetchError = [:]
         save()
     }
+
+    /// Same admin-managed catalog as `ceresifyRepository`, but the endpoint
+    /// that returns the panel's own category ranking (`page=1` includes a
+    /// `categories` array already sorted by the admin's configured order —
+    /// `limit=1` keeps this a cheap ranking-only request).
+    private static let categoryOrderURL = URL(
+        string: "https://dev.ceresify.com/api/apps/paged?ch=ahmad&page=1&limit=1"
+    )!
 
     // MARK: Networking
 
@@ -317,6 +333,32 @@ final class RepositoryStore: ObservableObject {
             }
         } catch {
             fetchError[repo.id] = error.localizedDescription
+        }
+    }
+
+    private struct PagedCategoriesResponse: Decodable {
+        struct Entry: Decodable { let originalName: String? }
+        let categories: [Entry]
+    }
+
+    /// Best-effort: leaves `categoryOrder` untouched (fresh feed or disk
+    /// cache) on any failure, since category ranking is a nice-to-have.
+    func refreshCategoryOrder() async {
+        do {
+            var req = URLRequest(url: Self.categoryOrderURL)
+            req.cachePolicy = .reloadIgnoringLocalCacheData
+            req.timeoutInterval = 30
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
+            let decoded = try await Task.detached(priority: .utility) {
+                try JSONDecoder().decode(PagedCategoriesResponse.self, from: data)
+            }.value
+            let order = decoded.categories.compactMap(\.originalName)
+            guard !order.isEmpty else { return }
+            categoryOrder = order
+            saveCategoryOrderCache()
+        } catch {
+            return
         }
     }
 
@@ -455,6 +497,25 @@ final class RepositoryStore: ObservableObject {
     private func saveCatalogCache() {
         let snapshot = catalog
         let destination = cacheURL
+        Task.detached(priority: .utility) {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: destination, options: .atomic)
+        }
+    }
+
+    private func loadCategoryOrderCache() async {
+        let sourceURL = categoryOrderCacheURL
+        let cached: [String]? = await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: sourceURL) else { return nil }
+            return try? JSONDecoder().decode([String].self, from: data)
+        }.value
+        guard let cached, !cached.isEmpty else { return }
+        categoryOrder = cached
+    }
+
+    private func saveCategoryOrderCache() {
+        let snapshot = categoryOrder
+        let destination = categoryOrderCacheURL
         Task.detached(priority: .utility) {
             guard let data = try? JSONEncoder().encode(snapshot) else { return }
             try? data.write(to: destination, options: .atomic)
