@@ -156,16 +156,23 @@ struct RepoAppDetailSheet: View {
     }
 
     private func descriptionSection(_ description: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        // Match the rest of the sheet: alignment is driven explicitly by the
+        // selected app language rather than the ambient layout direction.
+        let isArabic = languageCode == AppLanguage.arabic.rawValue
+        let alignment: Alignment = isArabic ? .trailing : .leading
+        let textAlignment: TextAlignment = isArabic ? .trailing : .leading
+
+        return VStack(alignment: isArabic ? .trailing : .leading, spacing: 10) {
             Text(localized("Description", "الوصف"))
                 .font(T.sans(13, .semibold))
                 .foregroundColor(T.ink3)
+                .frame(maxWidth: .infinity, alignment: alignment)
             Text(description)
                 .font(T.sans(14, .regular))
                 .foregroundColor(T.ink)
                 .lineSpacing(4)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: alignment)
+                .multilineTextAlignment(textAlignment)
         }
         .padding(.horizontal, T.pad + 4)
         .padding(.bottom, 28)

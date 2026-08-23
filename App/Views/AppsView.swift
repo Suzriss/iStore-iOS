@@ -19,16 +19,20 @@ struct AppsView: View {
         }
     }
 
-    /// Distinct categories in first-seen catalog order, as published by the source.
+    /// Categories ranked the same way the Ceresify catalog itself ranks them:
+    /// by how many packages/apps each one holds, largest first. Ties fall back
+    /// to first-seen order so the ranking stays stable between refreshes.
     private var categories: [String] {
-        var seen = Set<String>()
-        var ordered: [String] = []
+        var counts: [String: Int] = [:]
+        var firstSeenOrder: [String] = []
         for app in allApps {
             guard let category = app.category?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !category.isEmpty, seen.insert(category).inserted else { continue }
-            ordered.append(category)
+                  !category.isEmpty else { continue }
+            if counts[category] == nil { firstSeenOrder.append(category) }
+            counts[category, default: 0] += 1
         }
-        return ordered
+        // `sorted` is stable, so equal counts keep their first-seen order.
+        return firstSeenOrder.sorted { (counts[$0] ?? 0) > (counts[$1] ?? 0) }
     }
 
     /// True while the store catalog is being fetched and nothing has loaded yet.
@@ -245,11 +249,11 @@ struct AppsView: View {
                     title: isArabic ? "الكل" : "All",
                     isSelected: selectedCategory == nil
                 ) {
-                    selectedCategory = nil
+                    selectCategory(nil)
                 }
                 ForEach(categories, id: \.self) { category in
                     categoryChip(title: category, isSelected: selectedCategory == category) {
-                        selectedCategory = selectedCategory == category ? nil : category
+                        selectCategory(selectedCategory == category ? nil : category)
                     }
                 }
             }
@@ -258,6 +262,12 @@ struct AppsView: View {
         // Chips always read start-to-end in the language's own direction,
         // independent of each label's own script (emoji + Arabic text).
         .environment(\.layoutDirection, isArabic ? .rightToLeft : .leftToRight)
+    }
+
+    private func selectCategory(_ category: String?) {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            selectedCategory = category
+        }
     }
 
     private func categoryChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
@@ -270,10 +280,13 @@ struct AppsView: View {
                 .frame(height: 34)
                 .background {
                     if isSelected {
-                        Capsule().fill(T.isDark ? Color.white : Color.black)
+                        Capsule()
+                            .fill(T.isDark ? Color.white : Color.black)
+                            .transition(.opacity.combined(with: .scale(scale: 0.85)))
                     }
                 }
                 .fClearGlass(in: Capsule(), interactive: true)
+                .scaleEffect(isSelected ? 1.04 : 1.0)
         }
         .buttonStyle(.plain)
     }
