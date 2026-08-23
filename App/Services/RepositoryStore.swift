@@ -331,7 +331,28 @@ final class RepositoryStore: ObservableObject {
         let categories: [CategoryEntry]?
     }
 
+    /// A full catalog fetch fires this concurrently for every page (~17 requests
+    /// for the current ~8,500-app catalog); with a plain single attempt, one
+    /// flaky page on a real device's network — a timeout, a dropped connection —
+    /// throws and, via `withThrowingTaskGroup`, discards every other page that
+    /// already succeeded. Retrying transient failures here, per page, is what
+    /// keeps one bad request from turning into "apps missing from the store".
     private nonisolated static func fetchPagedCatalogPage(category: String, page: Int) async throws -> PagedCatalogPage {
+        var lastError: Error = URLError(.unknown)
+        for attempt in 0..<3 {
+            do {
+                return try await fetchPagedCatalogPageOnce(category: category, page: page)
+            } catch {
+                lastError = error
+                if attempt < 2 {
+                    try? await Task.sleep(nanoseconds: 400_000_000 * UInt64(attempt + 1))
+                }
+            }
+        }
+        throw lastError
+    }
+
+    private nonisolated static func fetchPagedCatalogPageOnce(category: String, page: Int) async throws -> PagedCatalogPage {
         var comps = URLComponents(string: pagedAppsBaseURL)!
         var items = [
             URLQueryItem(name: "ch", value: "ahmad"),
