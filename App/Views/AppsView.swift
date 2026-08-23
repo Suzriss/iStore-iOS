@@ -39,22 +39,31 @@ struct AppsView: View {
         return present.sorted { (rank[$0] ?? Int.max) < (rank[$1] ?? Int.max) }
     }
 
-    /// True while the store catalog is being fetched and nothing has loaded yet.
+    /// True while the store catalog (or, with a category selected, that
+    /// category's own admin-ordered list) is being fetched and nothing has
+    /// loaded yet.
     private var isLoadingCatalog: Bool {
-        repositories.loadingRepoID != nil && allApps.isEmpty
+        if let selectedCategory {
+            return repositories.loadingCategoryApps.contains(selectedCategory)
+                && (repositories.categoryApps[selectedCategory]?.isEmpty ?? true)
+        }
+        return repositories.loadingRepoID != nil && allApps.isEmpty
     }
 
-    /// The most recent fetch failure, if the catalog never loaded.
+    /// The most recent fetch failure, if nothing loaded for the active view.
     private var catalogErrorMessage: String? {
+        if let selectedCategory {
+            guard repositories.categoryApps[selectedCategory]?.isEmpty ?? true else { return nil }
+            return repositories.categoryAppsError[selectedCategory]
+        }
         guard allApps.isEmpty else { return nil }
         return repositories.repositories.compactMap { repositories.fetchError[$0.id] }.first
     }
 
     private func refreshDisplayedApps() {
-        var apps = allApps
-        if let selectedCategory {
-            apps = apps.filter { $0.category == selectedCategory }
-        }
+        // A selected category shows its own admin-ordered list (fetched
+        // on demand); "All" is the full catalog, already newest-first.
+        let apps = selectedCategory.map { repositories.categoryApps[$0] ?? [] } ?? allApps
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             displayedApps = apps
@@ -138,6 +147,9 @@ struct AppsView: View {
                 }
                 .refreshable {
                     await refreshAll()
+                    if let selectedCategory {
+                        await repositories.refreshCategoryApps(selectedCategory)
+                    }
                     refreshDisplayedApps()
                 }
                 .task(id: searchText) {
@@ -149,7 +161,10 @@ struct AppsView: View {
                     guard !Task.isCancelled else { return }
                     refreshDisplayedApps()
                 }
-                .onChange(of: selectedCategory) { _ in
+                .task(id: selectedCategory) {
+                    if let selectedCategory {
+                        await repositories.loadCategoryApps(selectedCategory)
+                    }
                     refreshDisplayedApps()
                 }
             }
@@ -186,9 +201,6 @@ struct AppsView: View {
                 group.addTask {
                     await repositories.refresh(repo)
                 }
-            }
-            group.addTask {
-                await repositories.refreshCategoryOrder()
             }
         }
     }
@@ -395,7 +407,11 @@ struct AppsView: View {
             MonoText(text: message, size: 10, color: T.ink3)
             Button {
                 Task {
-                    await refreshAll()
+                    if let selectedCategory {
+                        await repositories.refreshCategoryApps(selectedCategory)
+                    } else {
+                        await refreshAll()
+                    }
                     refreshDisplayedApps()
                 }
             } label: {

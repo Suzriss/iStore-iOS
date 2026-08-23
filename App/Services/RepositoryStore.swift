@@ -29,6 +29,13 @@ struct RepoSource: Codable, Equatable, Sendable {
     let iconURL: URL?
     let apps: [RepoApp]
 
+    init(name: String?, identifier: String?, iconURL: URL?, apps: [RepoApp]) {
+        self.name = name
+        self.identifier = identifier
+        self.iconURL = iconURL
+        self.apps = apps
+    }
+
     private enum CodingKeys: String, CodingKey { case name, identifier, iconURL, apps }
 
     init(from decoder: Decoder) throws {
@@ -229,8 +236,8 @@ final class RepositoryStore: ObservableObject {
     @Published var loadingRepoID: UUID?
 
     /// Category names in the order Ceresify's own admin panel ranks them
-    /// (its `CategoryOverride.order` field) — not derivable from the catalog
-    /// feed itself. Empty until `refreshCategoryOrder()` succeeds at least once.
+    /// (its `CategoryOverride.order` field). Populated as a side effect of
+    /// `refresh(_:)` — every `/api/apps/paged` page-1 response carries it.
     @Published private(set) var categoryOrder: [String] = []
 
     /// Bundle id of the app currently downloading, if any.
@@ -296,70 +303,122 @@ final class RepositoryStore: ObservableObject {
         save()
     }
 
-    /// Same admin-managed catalog as `ceresifyRepository`, but the endpoint
-    /// that returns the panel's own category ranking (`page=1` includes a
-    /// `categories` array already sorted by the admin's configured order —
-    /// `limit=1` keeps this a cheap ranking-only request).
-    private static let categoryOrderURL = URL(
-        string: "https://dev.ceresify.com/api/apps/paged?ch=ahmad&page=1&limit=1"
-    )!
-
     // MARK: Networking
+    //
+    // `/api/repo.json` (the flat AltStore feed) turned out to silently omit a
+    // handful of apps compared to the admin panel's real count, and carries no
+    // per-app admin ordering. `/api/apps/paged` is the endpoint the panel
+    // itself is built on: an empty `category` returns every active app sorted
+    // newest-first, and a named category returns exactly that category's apps
+    // in the admin's own configured order. Both fetches below page through it
+    // (500/page, page 1 sequentially since it also carries the category
+    // ranking, the rest concurrently).
+
+    private static let pagedAppsBaseURL = "https://dev.ceresify.com/api/apps/paged"
+    private static let pagedAppsPageSize = 500
+    /// Safety cap on pages fetched per request — comfortably above the whole
+    /// catalog's current size (~8,500 apps ≈ 18 pages) without an unbounded loop.
+    private static let pagedAppsMaxPages = 40
+
+    private struct PagedCatalogPage: Decodable {
+        struct CategoryEntry: Decodable { let originalName: String? }
+        let apps: [RepoApp]
+        let total: Int
+        let categories: [CategoryEntry]?
+    }
+
+    private nonisolated static func fetchPagedCatalogPage(category: String, page: Int) async throws -> PagedCatalogPage {
+        var comps = URLComponents(string: pagedAppsBaseURL)!
+        var items = [
+            URLQueryItem(name: "ch", value: "ahmad"),
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "limit", value: String(pagedAppsPageSize))
+        ]
+        if !category.isEmpty {
+            items.append(URLQueryItem(name: "category", value: category))
+        }
+        comps.queryItems = items
+        var req = URLRequest(url: comps.url!)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.timeoutInterval = 60
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        return try await Task.detached(priority: .utility) {
+            try JSONDecoder().decode(PagedCatalogPage.self, from: data)
+        }.value
+    }
+
+    /// Fetches every page for `category` (`""` = the full "All" list, sorted
+    /// newest-first). Also returns the admin's category ranking, present on
+    /// every page-1 response regardless of the category filter.
+    private nonisolated static func fetchAllPagedApps(category: String) async throws -> (apps: [RepoApp], categoryOrder: [String]?) {
+        let first = try await fetchPagedCatalogPage(category: category, page: 1)
+        var apps = first.apps
+        let order = first.categories?.compactMap(\.originalName)
+
+        let totalPages = first.total > 0
+            ? min(Int((Double(first.total) / Double(pagedAppsPageSize)).rounded(.up)), pagedAppsMaxPages)
+            : 1
+        if totalPages > 1 {
+            let remaining = try await withThrowingTaskGroup(of: (Int, [RepoApp]).self) { group -> [Int: [RepoApp]] in
+                for page in 2...totalPages {
+                    group.addTask {
+                        let result = try await fetchPagedCatalogPage(category: category, page: page)
+                        return (page, result.apps)
+                    }
+                }
+                var collected: [Int: [RepoApp]] = [:]
+                for try await (page, pageApps) in group { collected[page] = pageApps }
+                return collected
+            }
+            for page in 2...totalPages {
+                apps += remaining[page] ?? []
+            }
+        }
+        return (apps, order)
+    }
 
     func refresh(_ repo: Repository) async {
         loadingRepoID = repo.id
         fetchError[repo.id] = nil
         defer { if loadingRepoID == repo.id { loadingRepoID = nil } }
         do {
-            var req = URLRequest(url: repo.url)
-            req.cachePolicy = .reloadIgnoringLocalCacheData
-            req.timeoutInterval = 120
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
-                fetchError[repo.id] = "The repository server returned an error."
-                return
-            }
-            let source = try await Task.detached(priority: .utility) {
-                try JSONDecoder().decode(RepoSource.self, from: data)
-            }.value
-            catalog[repo.id] = source
+            let (apps, order) = try await Self.fetchAllPagedApps(category: "")
+            catalog[repo.id] = RepoSource(name: repo.name, identifier: nil, iconURL: nil, apps: apps)
             saveCatalogCache()
-            // Adopt the source's own display name once we know it.
-            if let name = source.name, !name.isEmpty,
-               let i = repositories.firstIndex(where: { $0.id == repo.id }),
-               repositories[i].name != name {
-                repositories[i].name = name
-                save()
+            if let order, !order.isEmpty {
+                categoryOrder = order
+                saveCategoryOrderCache()
             }
         } catch {
             fetchError[repo.id] = error.localizedDescription
         }
     }
 
-    private struct PagedCategoriesResponse: Decodable {
-        struct Entry: Decodable { let originalName: String? }
-        let categories: [Entry]
+    /// Apps for one category, in the admin panel's own order — populated
+    /// on demand when that category is actually browsed, kept in memory only.
+    @Published private(set) var categoryApps: [String: [RepoApp]] = [:]
+    @Published private(set) var loadingCategoryApps: Set<String> = []
+    @Published var categoryAppsError: [String: String] = [:]
+
+    func loadCategoryApps(_ category: String) async {
+        guard categoryApps[category] == nil, !loadingCategoryApps.contains(category) else { return }
+        loadingCategoryApps.insert(category)
+        defer { loadingCategoryApps.remove(category) }
+        do {
+            let (apps, _) = try await Self.fetchAllPagedApps(category: category)
+            categoryApps[category] = apps
+            categoryAppsError[category] = nil
+        } catch {
+            categoryAppsError[category] = error.localizedDescription
+        }
     }
 
-    /// Best-effort: leaves `categoryOrder` untouched (fresh feed or disk
-    /// cache) on any failure, since category ranking is a nice-to-have.
-    func refreshCategoryOrder() async {
-        do {
-            var req = URLRequest(url: Self.categoryOrderURL)
-            req.cachePolicy = .reloadIgnoringLocalCacheData
-            req.timeoutInterval = 30
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
-            let decoded = try await Task.detached(priority: .utility) {
-                try JSONDecoder().decode(PagedCategoriesResponse.self, from: data)
-            }.value
-            let order = decoded.categories.compactMap(\.originalName)
-            guard !order.isEmpty else { return }
-            categoryOrder = order
-            saveCategoryOrderCache()
-        } catch {
-            return
-        }
+    func refreshCategoryApps(_ category: String) async {
+        categoryApps[category] = nil
+        await loadCategoryApps(category)
     }
 
     func beginInstallAttempt(_ appID: String) {
