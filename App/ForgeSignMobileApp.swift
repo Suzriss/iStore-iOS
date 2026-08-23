@@ -112,7 +112,7 @@ struct ForgeSignMobileApp: App {
     }
 }
 
-/// Root: Apps + Sign + About tabs, theme injection + Dynamic Type cap.
+/// Root: Apps + Sign + General + About tabs, theme injection + Dynamic Type cap.
 /// The ambient glass backdrop is mounted inside each tab's NavigationStack.
 private struct ForgeRootView: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -133,9 +133,13 @@ private struct ForgeRootView: View {
                 .tabItem { Label("Sign", systemImage: "signature") }
                 .tag(1)
 
+            GeneralView()
+                .tabItem { Label("General", systemImage: "globe") }
+                .tag(2)
+
             AboutView()
                 .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(2)
+                .tag(3)
         }
         .tint(theme.accent)
         .forgeTheme(theme)
