@@ -40,7 +40,6 @@ struct ContentView: View {
     @State private var appVersion = ""
     @State private var selectedIconURL: URL?
     @State private var showShare = false
-    @State private var showSources = false
     @State private var showLibrary = false
 
     var body: some View {
@@ -106,10 +105,6 @@ struct ContentView: View {
                 }
                 .sheet(isPresented: $showShare) {
                     if let signedIPA { ShareSheet(items: [signedIPA]) }
-                }
-                .sheet(isPresented: $showSources) {
-                    SourcesView()
-                        .liquidGlassSheet()
                 }
                 .sheet(isPresented: $showAppEditor) {
                     AppEditorSheet(appName: $appDisplayName,
@@ -506,9 +501,6 @@ struct ContentView: View {
         VStack(spacing: 14) {
             automaticInstallStatus
 
-            GlassSecondaryButton(label: localized("Sources", "المصادر"), systemImage: "square.stack.3d.up") {
-                showSources = true
-            }
             GlassSecondaryButton(label: localized("Library", "المكتبة"), systemImage: "clock.arrow.circlepath") {
                 showLibrary = true
             }

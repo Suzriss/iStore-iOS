@@ -2,8 +2,8 @@ import Foundation
 
 // MARK: - Persisted repository record
 
-/// A user-added app source (AltStore-style). Only the URL + a display name are
-/// persisted; the fetched catalog is kept in memory and re-fetched on demand.
+/// An app source (AltStore-style catalog). iStore is locked to a single,
+/// fixed Ceresify repository — see `RepositoryStore.ceresifyRepository`.
 struct Repository: Codable, Identifiable, Equatable, Hashable {
     let id: UUID
     let url: URL
@@ -175,9 +175,9 @@ private enum LenientDecode {
 
 // MARK: - Store
 
-/// Remembers added repositories on-device (Application Support), fetches their
-/// AltStore JSON catalogs, and downloads an app's IPA into the container. A
-/// completed download is surfaced via `pendingIPA` for the silent installer to adopt.
+/// Fetches the Ceresify catalog (AltStore-shaped JSON) and downloads an app's
+/// IPA into the container. A completed download is surfaced via `pendingIPA`
+/// for the silent installer to adopt.
 @MainActor
 final class RepositoryStore: ObservableObject {
     @Published private(set) var repositories: [Repository] = []
@@ -219,7 +219,7 @@ final class RepositoryStore: ObservableObject {
         try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
         installedAppIDs = Set(UserDefaults.standard.stringArray(forKey: "istore.installed-app-ids") ?? [])
         load()
-        seedDefaultRepositories()
+        seedCeresifyRepository()
         Task { @MainActor [weak self] in
             await self?.loadCatalogCache()
         }
@@ -228,76 +228,22 @@ final class RepositoryStore: ObservableObject {
         #endif
     }
 
-    // MARK: Default sources
+    // MARK: Fixed source
 
-    private func seedDefaultRepositories() {
-        let defaults: [(String, String)] = [
-            ("https://repository.apptesters.org", "AppTesters"),
-            ("https://raw.githubusercontent.com/AbdTench/SwiftSource/refs/heads/main/My%20Source", "Cinemana")
-        ]
-        let migrationKey = "sources.two-only.migrated"
-        if !UserDefaults.standard.bool(forKey: migrationKey) {
-            repositories.removeAll()
-            for (rawURL, name) in defaults {
-                if let url = URL(string: rawURL) {
-                    repositories.append(Repository(url: url, name: name))
-                }
-            }
-            UserDefaults.standard.set(true, forKey: migrationKey)
-            save()
-            return
-        }
-        var changed = false
-        let sourceCountBeforeCleanup = repositories.count
-        repositories.removeAll { repo in
-            repo.name == "FastSign" ||
-            repo.name == "Alan's Gigantic Repo" ||
-            repo.url.absoluteString == "https://fastsign.dev/repo.json"
-        }
-        changed = repositories.count != sourceCountBeforeCleanup
-        for (rawURL, name) in defaults {
-            guard let url = URL(string: rawURL),
-                  !repositories.contains(where: { $0.url == url }) else { continue }
-            repositories.append(Repository(url: url, name: name))
-            changed = true
-        }
-        if changed { save() }
-    }
+    /// The single catalog iStore is locked to. Fixed id/date so the seed is a
+    /// no-op (and the in-memory catalog cache still hits) once already saved.
+    private static let ceresifyRepository = Repository(
+        id: UUID(uuidString: "5B1D7C8A-1CE6-4A00-8000-000000000001")!,
+        url: URL(string: "https://dev.ceresify.com/api/repo.json?ch=ahmad")!,
+        name: "Ceresify",
+        addedAt: Date(timeIntervalSince1970: 0)
+    )
 
-    // MARK: Repo list
-
-    enum AddError: LocalizedError {
-        case invalidURL, duplicate
-        var errorDescription: String? {
-            switch self {
-            case .invalidURL: return "Enter a valid http(s) repository URL."
-            case .duplicate: return "That repository is already added."
-            }
-        }
-    }
-
-    @discardableResult
-    func add(urlString: String) -> Result<Repository, AddError> {
-        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              url.host != nil else {
-            return .failure(.invalidURL)
-        }
-        guard !repositories.contains(where: { $0.url == url }) else {
-            return .failure(.duplicate)
-        }
-        let repo = Repository(url: url, name: url.host ?? trimmed)
-        repositories.append(repo)
-        save()
-        return .success(repo)
-    }
-
-    func remove(_ repo: Repository) {
-        repositories.removeAll { $0.id == repo.id }
-        catalog[repo.id] = nil
-        fetchError[repo.id] = nil
+    private func seedCeresifyRepository() {
+        guard repositories != [Self.ceresifyRepository] else { return }
+        repositories = [Self.ceresifyRepository]
+        catalog = [:]
+        fetchError = [:]
         save()
     }
 
