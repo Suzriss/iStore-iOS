@@ -10,12 +10,25 @@ struct AppsView: View {
     @State private var searchText = ""
     @State private var displayedApps: [RepoApp] = []
     @State private var didInitialRefresh = false
+    @State private var selectedCategory: String?
     @FocusState private var searchFieldFocused: Bool
 
     private var allApps: [RepoApp] {
         repositories.repositories.flatMap { repo in
             repositories.catalog[repo.id]?.apps ?? []
         }
+    }
+
+    /// Distinct categories in first-seen catalog order, as published by the source.
+    private var categories: [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for app in allApps {
+            guard let category = app.category?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !category.isEmpty, seen.insert(category).inserted else { continue }
+            ordered.append(category)
+        }
+        return ordered
     }
 
     /// True while the store catalog is being fetched and nothing has loaded yet.
@@ -30,12 +43,16 @@ struct AppsView: View {
     }
 
     private func refreshDisplayedApps() {
+        var apps = allApps
+        if let selectedCategory {
+            apps = apps.filter { $0.category == selectedCategory }
+        }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            displayedApps = allApps
+            displayedApps = apps
             return
         }
-        displayedApps = allApps.filter { app in
+        displayedApps = apps.filter { app in
             app.name.localizedCaseInsensitiveContains(query) ||
             (app.developerName?.localizedCaseInsensitiveContains(query) ?? false) ||
             (app.localizedDescription?.localizedCaseInsensitiveContains(query) ?? false)
@@ -75,6 +92,10 @@ struct AppsView: View {
                                 searchBar
                                     .padding(.horizontal, T.pad)
                                     .padding(.vertical, 8)
+                                if !categories.isEmpty {
+                                    categorySlider
+                                        .padding(.bottom, 10)
+                                }
                             }
                             .background(T.bg.opacity(T.isDark ? 0.90 : 0.94))
                             .zIndex(2)
@@ -118,6 +139,9 @@ struct AppsView: View {
                         return
                     }
                     guard !Task.isCancelled else { return }
+                    refreshDisplayedApps()
+                }
+                .onChange(of: selectedCategory) { _ in
                     refreshDisplayedApps()
                 }
             }
@@ -211,6 +235,47 @@ struct AppsView: View {
             interactive: true
         )
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: languageCode)
+    }
+
+    private var categorySlider: some View {
+        let isArabic = languageCode == AppLanguage.arabic.rawValue
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                categoryChip(
+                    title: isArabic ? "الكل" : "All",
+                    isSelected: selectedCategory == nil
+                ) {
+                    selectedCategory = nil
+                }
+                ForEach(categories, id: \.self) { category in
+                    categoryChip(title: category, isSelected: selectedCategory == category) {
+                        selectedCategory = selectedCategory == category ? nil : category
+                    }
+                }
+            }
+            .padding(.horizontal, T.pad)
+        }
+        // Chips always read start-to-end in the language's own direction,
+        // independent of each label's own script (emoji + Arabic text).
+        .environment(\.layoutDirection, isArabic ? .rightToLeft : .leftToRight)
+    }
+
+    private func categoryChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(T.sans(13, .semibold))
+                .foregroundColor(isSelected ? (T.isDark ? .black : .white) : T.ink)
+                .lineLimit(1)
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+                .background {
+                    if isSelected {
+                        Capsule().fill(T.isDark ? Color.white : Color.black)
+                    }
+                }
+                .fClearGlass(in: Capsule(), interactive: true)
+        }
+        .buttonStyle(.plain)
     }
 
     private var searchIcon: some View {

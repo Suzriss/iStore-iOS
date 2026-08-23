@@ -23,12 +23,15 @@ struct RepoAppDetailSheet: View {
                 ScrollView {
                     VStack(spacing: 0) {
                         hero
-                        appSummary
+                        infoPills
                         if !app.screenshotURLs.isEmpty {
                             screenshotsSection
                         }
-                        shortDivider
-                        infoPills
+                        if let description = app.localizedDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !description.isEmpty {
+                            shortDivider
+                            descriptionSection(description)
+                        }
                     }
                     // Keep the hero card below the floating back control so the
                     // sheet canvas remains visible at the top on every app.
@@ -39,8 +42,9 @@ struct RepoAppDetailSheet: View {
             }
         }
         .floatingGlassBackButton(action: { dismiss() })
-        // A compact detail layout avoids an oversized empty tail below the info cards.
-        .presentationDetents([.height(620)])
+        // Compact by default so short apps avoid an empty tail below the info
+        // cards; draggable to full height so a long description stays reachable.
+        .presentationDetents([.height(620), .large])
         .presentationCornerRadius(34)
         .presentationDragIndicator(.hidden)
         .presentationBackground { ForgeBackdrop() }
@@ -118,10 +122,6 @@ struct RepoAppDetailSheet: View {
         .padding(.horizontal, T.pad)
     }
 
-    private var appSummary: some View {
-        EmptyView()
-    }
-
     private var shortDivider: some View {
         Rectangle()
             .fill(Color.black.opacity(0.10))
@@ -132,12 +132,43 @@ struct RepoAppDetailSheet: View {
     private var infoPills: some View {
         HStack(alignment: .center, spacing: 12) {
             infoPill(title: localized("Version", "الإصدار"), value: localizedDigits(app.version ?? "—"))
+            infoPill(title: localized("Updated", "آخر تحديث"), value: localizedUpdatedValue)
             infoPill(title: localized("App Size", "حجم التطبيق"), value: localizedSizeValue)
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, T.pad + 20)
-        .padding(.top, 8)
+        .padding(.top, 22)
         .padding(.bottom, 18)
+    }
+
+    private static let updatedDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        // Fixed numeric, locale-neutral format — digits alone are then
+        // swapped to Eastern Arabic numerals to match the rest of the sheet.
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+
+    private var localizedUpdatedValue: String {
+        guard let date = app.lastUpdated else { return "—" }
+        return localizedDigits(Self.updatedDateFormatter.string(from: date))
+    }
+
+    private func descriptionSection(_ description: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(localized("Description", "الوصف"))
+                .font(T.sans(13, .semibold))
+                .foregroundColor(T.ink3)
+            Text(description)
+                .font(T.sans(14, .regular))
+                .foregroundColor(T.ink)
+                .lineSpacing(4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+        }
+        .padding(.horizontal, T.pad + 4)
+        .padding(.bottom, 28)
     }
 
     private var localizedSizeValue: String {
@@ -303,6 +334,7 @@ struct RepoAppDetailSheet: View {
                 .font(T.sans(16, .bold))
                 .foregroundColor(T.isDark ? .white : .black)
                 .lineLimit(1)
+                .minimumScaleFactor(0.6)
         }
         .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)

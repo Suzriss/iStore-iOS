@@ -55,24 +55,37 @@ struct RepoVersion: Codable, Equatable, Identifiable, Sendable {
     let version: String?
     let downloadURL: URL?
     let size: Int64?
+    let date: Date?
 
     var id: String {
         "\(version ?? "")|\(downloadURL?.absoluteString ?? "")"
     }
 
-    init(version: String?, downloadURL: URL?, size: Int64?) {
+    init(version: String?, downloadURL: URL?, size: Int64?, date: Date? = nil) {
         self.version = version
         self.downloadURL = downloadURL
         self.size = size
+        self.date = date
     }
 
-    private enum CodingKeys: String, CodingKey { case version, downloadURL, size }
+    private enum CodingKeys: String, CodingKey { case version, downloadURL, size, date }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try? c.decodeIfPresent(String.self, forKey: .version)
         downloadURL = LenientDecode.url(c, .downloadURL)
         size = LenientDecode.int64(c, .size)
+        date = LenientDecode.date(c, .date)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(version, forKey: .version)
+        try c.encodeIfPresent(downloadURL?.absoluteString, forKey: .downloadURL)
+        try c.encodeIfPresent(size, forKey: .size)
+        // Encoded as epoch seconds (not JSONEncoder's default reference-date
+        // seconds) so it round-trips through `LenientDecode.date` unchanged.
+        try c.encodeIfPresent(date?.timeIntervalSince1970, forKey: .date)
     }
 }
 
@@ -92,12 +105,15 @@ struct RepoApp: Codable, Identifiable, Equatable, Sendable {
     let downloadURL: URL?
     let size: Int64?
     let versions: [RepoVersion]
+    /// When this app's current version was published. Falls back to the
+    /// first entry in `versions` when the feed omits the flat field.
+    let lastUpdated: Date?
 
     var id: String { bundleIdentifier.isEmpty ? name : bundleIdentifier }
 
     private enum CodingKeys: String, CodingKey {
         case name, bundleIdentifier, developerName, localizedDescription, category
-        case iconURL, urlSchemes, urlScheme, screenshotURLs, screenshots, version, downloadURL, size, versions
+        case iconURL, urlSchemes, urlScheme, screenshotURLs, screenshots, version, downloadURL, size, versions, versionDate
     }
 
     init(from decoder: Decoder) throws {
@@ -139,6 +155,8 @@ struct RepoApp: Codable, Identifiable, Equatable, Sendable {
         version = flatVersion ?? first?.version
         downloadURL = flatURL ?? first?.downloadURL
         size = flatSize ?? first?.size
+        let flatDate = LenientDecode.date(c, .versionDate)
+        lastUpdated = flatDate ?? first?.date
     }
 
     func encode(to encoder: Encoder) throws {
@@ -155,6 +173,7 @@ struct RepoApp: Codable, Identifiable, Equatable, Sendable {
         try c.encodeIfPresent(downloadURL?.absoluteString, forKey: .downloadURL)
         try c.encodeIfPresent(size, forKey: .size)
         try c.encode(versions, forKey: .versions)
+        try c.encodeIfPresent(lastUpdated?.timeIntervalSince1970, forKey: .versionDate)
     }
 }
 
@@ -169,6 +188,26 @@ private enum LenientDecode {
     static func int64<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) -> Int64? {
         if let n = try? c.decodeIfPresent(Int64.self, forKey: key) { return n }
         if let s = try? c.decodeIfPresent(String.self, forKey: key) { return Int64(s) }
+        return nil
+    }
+
+    private static let isoWithFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let isoPlain = ISO8601DateFormatter()
+
+    /// Accepts either an ISO 8601 string from the network feed (with or
+    /// without fractional seconds) or a `timeIntervalSince1970` number, which
+    /// is how this app's own on-disk catalog cache round-trips dates.
+    static func date<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) -> Date? {
+        if let s = try? c.decodeIfPresent(String.self, forKey: key) {
+            return isoWithFraction.date(from: s) ?? isoPlain.date(from: s)
+        }
+        if let n = try? c.decodeIfPresent(Double.self, forKey: key) {
+            return Date(timeIntervalSince1970: n)
+        }
         return nil
     }
 }
