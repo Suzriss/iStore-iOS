@@ -191,12 +191,14 @@ private enum LenientDecode {
         return nil
     }
 
-    private static let isoWithFraction: ISO8601DateFormatter = {
+    // Only ever touched from the single background task that decodes a feed,
+    // never concurrently — safe despite ISO8601DateFormatter not being Sendable.
+    nonisolated(unsafe) private static let isoWithFraction: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
-    private static let isoPlain = ISO8601DateFormatter()
+    nonisolated(unsafe) private static let isoPlain = ISO8601DateFormatter()
 
     /// Accepts either an ISO 8601 string from the network feed (with or
     /// without fractional seconds) or a `timeIntervalSince1970` number, which
