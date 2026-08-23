@@ -13,6 +13,26 @@ struct AppsView: View {
     @State private var selectedCategory: String?
     @FocusState private var searchFieldFocused: Bool
 
+    /// How many rows are revealed at a time. Keeps a big catalog from
+    /// dumping thousands of rows into the list the instant a fetch
+    /// completes — it reveals in App Store-sized batches as you scroll.
+    private static let pageSize = 25
+    @State private var visibleCount = pageSize
+
+    private var visibleApps: [RepoApp] {
+        Array(displayedApps.prefix(visibleCount))
+    }
+
+    /// Called as rows scroll into view; grows the visible window one page
+    /// early (a few rows before the end) so the next batch is ready before
+    /// the user hits the bottom.
+    private func loadMoreIfNeeded(index: Int) {
+        guard visibleCount < displayedApps.count, index >= visibleApps.count - 5 else { return }
+        withAnimation(.easeOut(duration: 0.25)) {
+            visibleCount = min(visibleCount + Self.pageSize, displayedApps.count)
+        }
+    }
+
     private var allApps: [RepoApp] {
         repositories.repositories.flatMap { repo in
             repositories.catalog[repo.id]?.apps ?? []
@@ -65,15 +85,15 @@ struct AppsView: View {
         // on demand); "All" is the full catalog, already newest-first.
         let apps = selectedCategory.map { repositories.categoryApps[$0] ?? [] } ?? allApps
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            displayedApps = apps
-            return
-        }
-        displayedApps = apps.filter { app in
+        displayedApps = query.isEmpty ? apps : apps.filter { app in
             app.name.localizedCaseInsensitiveContains(query) ||
             (app.developerName?.localizedCaseInsensitiveContains(query) ?? false) ||
             (app.localizedDescription?.localizedCaseInsensitiveContains(query) ?? false)
         }
+        // A new base list (fresh fetch, category switch, search) starts back
+        // at one page — never carry over a scroll-grown window onto content
+        // the user hasn't scrolled to yet.
+        visibleCount = Self.pageSize
     }
 
     var body: some View {
@@ -94,13 +114,14 @@ struct AppsView: View {
                                 // Do not nest a LazyVStack inside the section's
                                 // lazy container: nested lazy layout can preserve
                                 // stale row positions while filtering.
-                                ForEach(displayedApps.indices, id: \.self) { index in
-                                    appRow(displayedApps[index])
+                                ForEach(visibleApps.indices, id: \.self) { index in
+                                    appRow(visibleApps[index])
                                         .padding(.horizontal, T.pad)
                                         .padding(.bottom, 12)
                                         .transaction { transaction in
                                             transaction.animation = nil
                                         }
+                                        .onAppear { loadMoreIfNeeded(index: index) }
                                 }
                             }
                         } header: {
@@ -460,6 +481,7 @@ struct AppsView: View {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
         .glassSurface(.card, cornerRadius: 18)
+        .modifier(RowRevealAnimation())
     }
 
     private func getButton(_ app: RepoApp) -> some View {
@@ -480,5 +502,24 @@ struct AppsView: View {
                 Task { await repositories.download(app) }
             }
         }
+    }
+}
+
+/// Fades + settles a row in the moment it first scrolls on screen, instead
+/// of it popping in fully-formed. Keyed to this view instance, so it fires
+/// once per row and stays out of the way of `appRow`'s own transaction
+/// (which intentionally suppresses animation on filter/category swaps).
+private struct RowRevealAnimation: ViewModifier {
+    @State private var appeared = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared ? 0 : 8)
+            .onAppear {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    appeared = true
+                }
+            }
     }
 }

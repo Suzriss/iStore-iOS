@@ -115,12 +115,11 @@ struct ForgeSignMobileApp: App {
 /// Root: Apps + Sign + General + About tabs, theme injection + Dynamic Type cap.
 /// The ambient glass backdrop is mounted inside each tab's NavigationStack.
 ///
-/// A custom bottom bar instead of native `TabView`/`tabItem` chrome — mirrors
-/// Ceresify's own app-shell.html bottom nav, which shows a small dot under
-/// the active tab (native `TabView` has no way to add that). All four tabs
-/// stay mounted the whole time and are just toggled by opacity/hit-testing,
-/// the same "always-alive, cross-fade" approach app-shell.html itself uses
-/// (it keeps every page's iframe loaded and swaps `.active` on them).
+/// A custom bottom bar instead of native `TabView`/`tabItem` chrome, styled
+/// after the App Store's own tab bar: outline icons swap to filled ones on
+/// the active tab (no separate indicator dot) with a springy bounce, and the
+/// screen underneath cross-fades rather than cutting instantly. All four
+/// tabs stay mounted the whole time and are just toggled by opacity/hit-testing.
 private struct ForgeRootView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var history: HistoryStore
@@ -133,15 +132,18 @@ private struct ForgeRootView: View {
 
     private struct TabSpec {
         let icon: String
+        /// App Store-style filled counterpart shown only while the tab is
+        /// active; falls back to `icon` for symbols with no `.fill` variant.
+        let filledIcon: String
         let english: String
         let arabic: String
     }
 
     private static let tabs: [TabSpec] = [
-        TabSpec(icon: "square.grid.2x2", english: "Apps", arabic: "التطبيقات"),
-        TabSpec(icon: "signature", english: "Sign", arabic: "توقيع"),
-        TabSpec(icon: "globe", english: "General", arabic: "عام"),
-        TabSpec(icon: "info.circle", english: "About", arabic: "حول")
+        TabSpec(icon: "square.grid.2x2", filledIcon: "square.grid.2x2.fill", english: "Apps", arabic: "التطبيقات"),
+        TabSpec(icon: "signature", filledIcon: "signature", english: "Sign", arabic: "توقيع"),
+        TabSpec(icon: "globe", filledIcon: "globe", english: "General", arabic: "عام"),
+        TabSpec(icon: "info.circle", filledIcon: "info.circle.fill", english: "About", arabic: "حول")
     ]
 
     var body: some View {
@@ -164,6 +166,8 @@ private struct ForgeRootView: View {
                     .allowsHitTesting(tab == 3)
                     .accessibilityHidden(tab != 3)
             }
+            // Screens cross-fade into each other instead of cutting instantly.
+            .animation(.easeInOut(duration: 0.22), value: tab)
             // Reserves the bar's own height so scroll content never sits
             // underneath it — the same space native TabView reserved before.
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -204,19 +208,20 @@ private struct ForgeRootView: View {
                 let haptic = UIImpactFeedbackGenerator(style: .light)
                 haptic.prepare()
                 haptic.impactOccurred()
-                tab = index
+                // A springy overshoot on the icon plus the outer cross-fade
+                // is what gives switching tabs the App Store's bouncy feel.
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.55)) {
+                    tab = index
+                }
             }
         } label: {
             VStack(spacing: 3) {
-                Image(systemName: spec.icon)
+                Image(systemName: isActive ? spec.filledIcon : spec.icon)
                     .font(.system(size: 21, weight: isActive ? .semibold : .regular))
                     .frame(height: 22)
+                    .scaleEffect(isActive ? 1.1 : 1.0)
                 Text(title)
                     .font(.system(size: 10.5, weight: .semibold))
-                Circle()
-                    .fill(theme.accent)
-                    .frame(width: 4, height: 4)
-                    .opacity(isActive ? 1 : 0)
             }
             .foregroundColor(isActive ? theme.accent : theme.ink3)
             .frame(maxWidth: .infinity)
