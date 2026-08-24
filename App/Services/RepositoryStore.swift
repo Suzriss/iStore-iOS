@@ -116,7 +116,19 @@ struct RepoApp: Codable, Identifiable, Equatable, Sendable {
     /// first entry in `versions` when the feed omits the flat field.
     let lastUpdated: Date?
 
-    var id: String { bundleIdentifier.isEmpty ? name : bundleIdentifier }
+    /// Row identity. Deliberately *not* the bundle id on its own: a single
+    /// bundle id legitimately carries several different builds in this
+    /// catalog — `com.google.ios.youtube` ships as iQTube, YouTube LRD,
+    /// YouTube Sy, YouTube Plus, SAT YouTube and YouTube DLTube, and
+    /// `com.zhiliaoapp.musically` as seven separate TikTok mods. Keying rows
+    /// on the bundle id alone made every one of those variants share a single
+    /// identity, so tapping GET on one spun the loading state on all of them
+    /// and disabled the rest. Folding the name in gives each build its own
+    /// identity while two listings of the genuinely same build still collapse.
+    var id: String {
+        let base = bundleIdentifier.isEmpty ? name : bundleIdentifier
+        return name.isEmpty ? base : "\(base)|\(name)"
+    }
 
     private enum CodingKeys: String, CodingKey {
         case name, bundleIdentifier, developerName, localizedDescription, category
@@ -381,6 +393,28 @@ final class RepositoryStore: ObservableObject {
         let apps: [RepoApp]
         let total: Int
         let categories: [CategoryEntry]?
+
+        private enum CodingKeys: String, CodingKey { case apps, total, categories }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            // `[RepoApp]` decoded straight would throw on the first entry the
+            // decoder cannot read — failing the page, then all three retries,
+            // then the whole refresh. One odd record would cost the entire
+            // 8,500-app catalog, so entries are skipped individually here the
+            // same way `RepoSource` already skips them in the flat feed.
+            apps = (try c.decode([FailableApp].self, forKey: .apps)).compactMap(\.value)
+            // `total` stays strict on purpose: it drives how many pages get
+            // fetched, so defaulting a missing one to zero would silently cap
+            // the catalog at a single page instead of failing into a retry.
+            total = try c.decode(Int.self, forKey: .total)
+            categories = try? c.decodeIfPresent([CategoryEntry].self, forKey: .categories)
+        }
+
+        private struct FailableApp: Decodable {
+            let value: RepoApp?
+            init(from decoder: Decoder) throws { value = try? RepoApp(from: decoder) }
+        }
     }
 
     /// A full catalog fetch fires this concurrently for every page (~17 requests
