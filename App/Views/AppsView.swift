@@ -12,7 +12,9 @@ struct AppsView: View {
 
     @State private var selectedApp: RepoApp?
     @State private var searchText = ""
-    @State private var displayedApps: [RepoApp] = []
+    /// `searchText` after the keystroke debounce below. Filtering reads this
+    /// so typing never re-scans the whole catalog on every character.
+    @State private var searchQuery = ""
     @State private var lastRefresh: Date?
     @State private var selectedCategory: String?
     @FocusState private var searchFieldFocused: Bool
@@ -30,17 +32,13 @@ struct AppsView: View {
     private static let pageSize = 25
     @State private var visibleCount = pageSize
 
-    private var visibleApps: [RepoApp] {
-        Array(displayedApps.prefix(visibleCount))
-    }
-
     /// Called as rows scroll into view; grows the visible window one page
     /// early (a few rows before the end) so the next batch is ready before
     /// the user hits the bottom.
-    private func loadMoreIfNeeded(index: Int) {
-        guard visibleCount < displayedApps.count, index >= visibleApps.count - 5 else { return }
+    private func loadMoreIfNeeded(index: Int, of total: Int) {
+        guard visibleCount < total, index >= min(visibleCount, total) - 5 else { return }
         withAnimation(.easeOut(duration: 0.25)) {
-            visibleCount = min(visibleCount + Self.pageSize, displayedApps.count)
+            visibleCount = min(visibleCount + Self.pageSize, total)
         }
     }
 
@@ -76,8 +74,13 @@ struct AppsView: View {
     /// loaded yet.
     private var isLoadingCatalog: Bool {
         if let selectedCategory {
-            return repositories.loadingCategoryApps.contains(selectedCategory)
-                && (repositories.categoryApps[selectedCategory]?.isEmpty ?? true)
+            // No cached list and no recorded failure means the fetch is
+            // running, or starts on the next runloop. Either way the tab is
+            // loading — it must never claim the category has no apps. A
+            // category that really is empty caches an empty array, which is
+            // not `nil`, so it still falls through to the empty state.
+            return repositories.categoryApps[selectedCategory] == nil
+                && repositories.categoryAppsError[selectedCategory] == nil
         }
         return repositories.loadingRepoID != nil && allApps.isEmpty
     }
@@ -85,31 +88,47 @@ struct AppsView: View {
     /// The most recent fetch failure, if nothing loaded for the active view.
     private var catalogErrorMessage: String? {
         if let selectedCategory {
-            guard repositories.categoryApps[selectedCategory]?.isEmpty ?? true else { return nil }
+            guard repositories.categoryApps[selectedCategory] == nil else { return nil }
             return repositories.categoryAppsError[selectedCategory]
         }
         guard allApps.isEmpty else { return nil }
         return repositories.repositories.compactMap { repositories.fetchError[$0.id] }.first
     }
 
-    private func refreshDisplayedApps() {
-        // A selected category shows its own admin-ordered list (fetched
-        // on demand); "All" is the full catalog, already newest-first.
+    /// The list on screen, derived straight from the store: a selected
+    /// category shows its own admin-ordered list (fetched on demand), while
+    /// "All" is the full catalog, already newest-first.
+    ///
+    /// Deliberately computed rather than mirrored into `@State`. The mirror
+    /// only refilled at a handful of call sites, so any path that populated
+    /// `categoryApps` outside them — a fetch landing after its view task was
+    /// cancelled, a catalog refresh dropping the cached lists — left the tab
+    /// showing an empty category until the user pulled to refresh.
+    private var displayedApps: [RepoApp] {
         let apps = selectedCategory.map { repositories.categoryApps[$0] ?? [] } ?? allApps
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        displayedApps = query.isEmpty ? apps : apps.filter { app in
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return apps }
+        return apps.filter { app in
             app.name.localizedCaseInsensitiveContains(query) ||
             (app.developerName?.localizedCaseInsensitiveContains(query) ?? false) ||
             (app.localizedDescription?.localizedCaseInsensitiveContains(query) ?? false)
         }
-        // A new base list (fresh fetch, category switch, search) starts back
-        // at one page — never carry over a scroll-grown window onto content
-        // the user hasn't scrolled to yet.
-        visibleCount = Self.pageSize
+    }
+
+    /// Non-nil while the selected category still has no list cached. Keying
+    /// the fetch to this rather than to the selection alone also restarts it
+    /// when the cache is dropped underneath the view — which is exactly what
+    /// a successful catalog refresh does to every per-category list.
+    private var pendingCategory: String? {
+        guard let selectedCategory,
+              repositories.categoryApps[selectedCategory] == nil else { return nil }
+        return selectedCategory
     }
 
     var body: some View {
-        NavigationStack {
+        let apps = displayedApps
+        let visibleApps = Array(apps.prefix(visibleCount))
+        return NavigationStack {
             ZStack {
                 ScrollView {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
@@ -127,7 +146,7 @@ struct AppsView: View {
                         }
 
                         Section {
-                            if displayedApps.isEmpty {
+                            if apps.isEmpty {
                                 if isLoadingCatalog {
                                     loadingState
                                 } else if let catalogErrorMessage {
@@ -146,7 +165,7 @@ struct AppsView: View {
                                         .transaction { transaction in
                                             transaction.animation = nil
                                         }
-                                        .onAppear { loadMoreIfNeeded(index: index) }
+                                        .onAppear { loadMoreIfNeeded(index: index, of: apps.count) }
                                 }
                             }
                         } header: {
@@ -203,13 +222,20 @@ struct AppsView: View {
                         return
                     }
                     guard !Task.isCancelled else { return }
-                    refreshDisplayedApps()
+                    searchQuery = searchText
                 }
-                .task(id: selectedCategory) {
-                    if let selectedCategory {
-                        await repositories.loadCategoryApps(selectedCategory)
-                    }
-                    refreshDisplayedApps()
+                .task(id: pendingCategory) {
+                    guard let pendingCategory else { return }
+                    await repositories.loadCategoryApps(pendingCategory)
+                }
+                // A new base list starts back at one page — never carry a
+                // scroll-grown window over onto content the user has not
+                // scrolled to yet.
+                .onChange(of: selectedCategory) { _ in
+                    visibleCount = Self.pageSize
+                }
+                .onChange(of: searchQuery) { _ in
+                    visibleCount = Self.pageSize
                 }
             }
             .contentShape(Rectangle())
@@ -239,18 +265,15 @@ struct AppsView: View {
     }
 
     /// Re-reads the catalog when it has gone stale, or unconditionally when
-    /// the user pulled to refresh. The selected category is re-read in the
-    /// same pass: `refresh(_:)` drops the cached per-category lists, so
-    /// without this the visible category would briefly empty out.
+    /// the user pulled to refresh. The selected category needs no second call
+    /// here: a successful `refresh(_:)` drops the cached per-category lists,
+    /// and `pendingCategory` turns that straight into a re-fetch — which also
+    /// keeps this from racing the view's own category task.
     private func refreshIfStale(force: Bool = false) async {
         if !force, let lastRefresh, Date.now.timeIntervalSince(lastRefresh) < Self.freshnessWindow {
             return
         }
         await refreshAll()
-        if let selectedCategory {
-            await repositories.refreshCategoryApps(selectedCategory)
-        }
-        refreshDisplayedApps()
         lastRefresh = .now
     }
 
@@ -550,7 +573,6 @@ struct AppsView: View {
                     } else {
                         await refreshAll()
                     }
-                    refreshDisplayedApps()
                 }
             } label: {
                 Text(languageCode == AppLanguage.arabic.rawValue ? "إعادة المحاولة" : "Retry")

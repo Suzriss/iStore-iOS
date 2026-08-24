@@ -490,20 +490,35 @@ final class RepositoryStore: ObservableObject {
         }.value
     }
 
-    /// Fetches every page for `category` (`""` = the full "All" list, sorted
-    /// newest-first). Also returns the admin's category ranking, present on
-    /// every page-1 response regardless of the category filter.
-    /// What one catalog fetch yields. `categories` and `banners` ride along on
-    /// the page-1 response, so they arrive for free with the apps.
+    /// What one catalog fetch yields, for `category` (`""` = the full "All"
+    /// list, sorted newest-first). `categories` — the admin's own ranking —
+    /// and `banners` ride along on the page-1 response regardless of the
+    /// category filter, so they arrive for free with the apps.
     struct CatalogFetch: Sendable {
         let apps: [RepoApp]
         let categories: [RepoCategory]?
         let banners: [RepoBanner]?
     }
 
+    /// Fetches every page and returns the whole list in one piece.
     private nonisolated static func fetchAllPagedApps(category: String) async throws -> CatalogFetch {
+        let (first, remainingPages) = try await fetchFirstPagedApps(category: category)
+        guard !remainingPages.isEmpty else { return first }
+        let rest = try await fetchRemainingPagedApps(category: category, pages: remainingPages)
+        return CatalogFetch(apps: first.apps + rest, categories: first.categories, banners: first.banners)
+    }
+
+    /// Page 1, plus the range of further pages the response says exist.
+    ///
+    /// Split out from `fetchAllPagedApps` so a caller can put those first
+    /// apps on screen immediately: the largest category runs to thirteen
+    /// pages, and waiting for the slowest of them left the tab showing
+    /// nothing at all for many seconds — even though the list only ever
+    /// reveals twenty-five rows at a time.
+    private nonisolated static func fetchFirstPagedApps(
+        category: String
+    ) async throws -> (fetch: CatalogFetch, remainingPages: Range<Int>) {
         let first = try await fetchPagedCatalogPage(category: category, page: 1)
-        var apps = first.apps
         // `originalName` is the key the API filters on; `displayName` and
         // `icon` are what the panel wants shown for it. Entries without an
         // original name cannot be filtered on, so they are dropped.
@@ -531,23 +546,30 @@ final class RepositoryStore: ObservableObject {
         let totalPages = first.total > 0
             ? min(Int((Double(first.total) / Double(pagedAppsPageSize)).rounded(.up)), pagedAppsMaxPages)
             : 1
-        if totalPages > 1 {
-            let remaining = try await withThrowingTaskGroup(of: (Int, [RepoApp]).self) { group -> [Int: [RepoApp]] in
-                for page in 2...totalPages {
-                    group.addTask {
-                        let result = try await fetchPagedCatalogPage(category: category, page: page)
-                        return (page, result.apps)
-                    }
+        return (
+            CatalogFetch(apps: first.apps, categories: categories, banners: banners),
+            2 ..< (totalPages + 1)
+        )
+    }
+
+    /// Pages 2…n, fetched concurrently and concatenated back in page order.
+    private nonisolated static func fetchRemainingPagedApps(
+        category: String,
+        pages: Range<Int>
+    ) async throws -> [RepoApp] {
+        guard !pages.isEmpty else { return [] }
+        let collected = try await withThrowingTaskGroup(of: (Int, [RepoApp]).self) { group -> [Int: [RepoApp]] in
+            for page in pages {
+                group.addTask {
+                    let result = try await fetchPagedCatalogPage(category: category, page: page)
+                    return (page, result.apps)
                 }
-                var collected: [Int: [RepoApp]] = [:]
-                for try await (page, pageApps) in group { collected[page] = pageApps }
-                return collected
             }
-            for page in 2...totalPages {
-                apps += remaining[page] ?? []
-            }
+            var collected: [Int: [RepoApp]] = [:]
+            for try await (page, pageApps) in group { collected[page] = pageApps }
+            return collected
         }
-        return CatalogFetch(apps: apps, categories: categories, banners: banners)
+        return pages.flatMap { collected[$0] ?? [] }
     }
 
     func refresh(_ repo: Repository) async {
@@ -581,25 +603,64 @@ final class RepositoryStore: ObservableObject {
     /// Apps for one category, in the admin panel's own order — populated
     /// on demand when that category is actually browsed, kept in memory only.
     @Published private(set) var categoryApps: [String: [RepoApp]] = [:]
-    @Published private(set) var loadingCategoryApps: Set<String> = []
     @Published var categoryAppsError: [String: String] = [:]
+    /// The fetch currently running for each category, so a second caller
+    /// joins it instead of being turned away empty-handed.
+    private var categoryTasks: [String: Task<Void, Never>] = [:]
 
+    /// Loads `category` unless its list is already cached.
     func loadCategoryApps(_ category: String) async {
-        guard categoryApps[category] == nil, !loadingCategoryApps.contains(category) else { return }
-        loadingCategoryApps.insert(category)
-        defer { loadingCategoryApps.remove(category) }
-        do {
-            let fetched = try await Self.fetchAllPagedApps(category: category)
-            categoryApps[category] = fetched.apps
-            categoryAppsError[category] = nil
-        } catch {
-            categoryAppsError[category] = error.localizedDescription
-        }
+        guard categoryApps[category] == nil else { return }
+        await fetchCategoryApps(category)
     }
 
+    /// Re-reads `category` even if it is cached, replacing the list in place
+    /// so the category on screen never blanks out mid-fetch.
     func refreshCategoryApps(_ category: String) async {
-        categoryApps[category] = nil
-        await loadCategoryApps(category)
+        await fetchCategoryApps(category)
+    }
+
+    /// The single fetch path for a category list.
+    ///
+    /// The network work runs in an unstructured `Task` on purpose. The Apps
+    /// tab starts these from a SwiftUI `.task(id:)` that is cancelled the
+    /// moment the user taps another chip, and a cancelled fetch used to leave
+    /// the category with no list at all — while a concurrent caller that
+    /// found it "already loading" returned instantly and rendered an empty
+    /// list that only a pull-to-refresh could repair. Owning the task here
+    /// means the fetch always runs to completion and fills the cache, and
+    /// every caller awaits the same result.
+    private func fetchCategoryApps(_ category: String) async {
+        if let inFlight = categoryTasks[category] {
+            await inFlight.value
+            return
+        }
+        // Clear a previous failure up front: until this attempt settles the
+        // tab should show its loading state, not the last error.
+        categoryAppsError[category] = nil
+        let task = Task { @MainActor [weak self] in
+            defer { self?.categoryTasks[category] = nil }
+            do {
+                // Publish page 1 the moment it lands so the chip the user just
+                // tapped fills in, then append the rest behind it. Only twenty
+                // five rows are on screen anyway, and the tail of a thirteen
+                // page category is thousands of rows further down.
+                let (first, remainingPages) =
+                    try await RepositoryStore.fetchFirstPagedApps(category: category)
+                self?.categoryApps[category] = first.apps
+                self?.categoryAppsError[category] = nil
+                guard !remainingPages.isEmpty else { return }
+                let rest = try await RepositoryStore.fetchRemainingPagedApps(
+                    category: category,
+                    pages: remainingPages
+                )
+                self?.categoryApps[category] = first.apps + rest
+            } catch {
+                self?.categoryAppsError[category] = error.localizedDescription
+            }
+        }
+        categoryTasks[category] = task
+        await task.value
     }
 
     func beginInstallAttempt(_ appID: String) {
