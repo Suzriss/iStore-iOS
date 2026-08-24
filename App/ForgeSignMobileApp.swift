@@ -115,11 +115,13 @@ struct ForgeSignMobileApp: App {
 /// Root: Apps + Sign + General + About tabs, theme injection + Dynamic Type cap.
 /// The ambient glass backdrop is mounted inside each tab's NavigationStack.
 ///
-/// A custom bottom bar instead of native `TabView`/`tabItem` chrome, styled
-/// after the App Store's own tab bar: outline icons swap to filled ones on
-/// the active tab (no separate indicator dot) with a springy bounce, and the
-/// screen underneath cross-fades rather than cutting instantly. All four
-/// tabs stay mounted the whole time and are just toggled by opacity/hit-testing.
+/// A custom bottom bar instead of native `TabView`/`tabItem` chrome: a
+/// floating Liquid Glass bar, inset from both edges the way iOS 26's own tab
+/// bars sit, with App Store behaviour on top of it — outline icons swap to
+/// filled ones on the active tab (no separate indicator dot) with a springy
+/// bounce, and the screen underneath cross-fades rather than cutting
+/// instantly. All four tabs stay mounted the whole time and are just toggled
+/// by opacity/hit-testing.
 private struct ForgeRootView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var history: HistoryStore
@@ -168,10 +170,11 @@ private struct ForgeRootView: View {
             }
             // Screens cross-fade into each other instead of cutting instantly.
             .animation(.easeInOut(duration: 0.22), value: tab)
-            // Reserves the bar's own height so scroll content never sits
-            // underneath it — the same space native TabView reserved before.
+            // Reserves the floating bar's height plus its outer padding, so
+            // scroll content comes to rest above the glass instead of ending
+            // up trapped behind it.
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                Color.clear.frame(height: 50)
+                Color.clear.frame(height: 64)
             }
 
             tabBar
@@ -187,16 +190,15 @@ private struct ForgeRootView: View {
                 tabButton(index)
             }
         }
-        .padding(.top, 10)
+        .padding(.vertical, 11)
         .frame(maxWidth: .infinity)
-        .background {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay(alignment: .top) {
-                    Rectangle().fill(theme.rule).frame(height: AppStroke.hairline)
-                }
-                .ignoresSafeArea(edges: .bottom)
-        }
+        // The bar is itself a Liquid Glass surface (`GlassRole.tabBar`) rather
+        // than a flat material with a divider rule: it floats clear of both
+        // edges so the system renders live refraction, edge light and the
+        // interactive highlight against whatever scrolls underneath it.
+        .glassSurface(.tabBar)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 4)
     }
 
     private func tabButton(_ index: Int) -> some View {
