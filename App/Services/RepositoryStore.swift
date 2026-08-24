@@ -221,6 +221,51 @@ private enum LenientDecode {
     }
 }
 
+// MARK: - Category (admin panel controlled)
+
+/// One browsable category exactly as Ceresify's admin panel defines it.
+///
+/// `originalName` is the key `/api/apps/paged?category=` filters on and must
+/// be sent back verbatim — including any emoji prefix, and including the
+/// `custom:<id>` form the panel uses for hand-built categories. `displayName`
+/// is what the panel wants the user to read, which is often the same name
+/// with the emoji stripped or replaced entirely. Showing `originalName` was
+/// what made a renamed category keep its old label in the app.
+struct RepoCategory: Codable, Equatable, Hashable, Identifiable, Sendable {
+    let originalName: String
+    let displayName: String
+    let iconURL: URL?
+
+    var id: String { originalName }
+
+    private enum CodingKeys: String, CodingKey { case originalName, displayName, iconURL }
+
+    init(originalName: String, displayName: String, iconURL: URL?) {
+        self.originalName = originalName
+        self.displayName = displayName
+        self.iconURL = iconURL
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        originalName = try c.decode(String.self, forKey: .originalName)
+        let decodedDisplay = try? c.decodeIfPresent(String.self, forKey: .displayName)
+        if let name = decodedDisplay ?? nil, !name.isEmpty {
+            displayName = name
+        } else {
+            displayName = originalName
+        }
+        iconURL = LenientDecode.url(c, .iconURL)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(originalName, forKey: .originalName)
+        try c.encode(displayName, forKey: .displayName)
+        try c.encodeIfPresent(iconURL?.absoluteString, forKey: .iconURL)
+    }
+}
+
 // MARK: - Store
 
 /// Fetches the Ceresify catalog (AltStore-shaped JSON) and downloads an app's
@@ -235,10 +280,11 @@ final class RepositoryStore: ObservableObject {
     @Published var fetchError: [UUID: String] = [:]
     @Published var loadingRepoID: UUID?
 
-    /// Category names in the order Ceresify's own admin panel ranks them
-    /// (its `CategoryOverride.order` field). Populated as a side effect of
-    /// `refresh(_:)` — every `/api/apps/paged` page-1 response carries it.
-    @Published private(set) var categoryOrder: [String] = []
+    /// The categories Ceresify's admin panel wants shown, in its own order.
+    /// Populated as a side effect of `refresh(_:)` — every `/api/apps/paged`
+    /// page-1 response carries the list, already filtered server-side (hidden
+    /// categories are gone) and ranked by `CategoryOverride.order`.
+    @Published private(set) var categories: [RepoCategory] = []
 
     /// Bundle id of the app currently downloading, if any.
     @Published var activeDownloadID: String?
@@ -259,7 +305,7 @@ final class RepositoryStore: ObservableObject {
 
     private let indexURL: URL
     private let cacheURL: URL
-    private let categoryOrderCacheURL: URL
+    private let categoryCacheURL: URL
     private let downloadsDir: URL
     private var installWatchdogTask: Task<Void, Never>?
 
@@ -269,7 +315,9 @@ final class RepositoryStore: ObservableObject {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         indexURL = base.appendingPathComponent("repositories.json")
         cacheURL = base.appendingPathComponent("repository-catalog-cache.json")
-        categoryOrderCacheURL = base.appendingPathComponent("category-order-cache.json")
+        // Deliberately the pre-existing filename: older builds wrote a bare
+        // [String] here, and `loadCategoryCache` still migrates that shape.
+        categoryCacheURL = base.appendingPathComponent("category-order-cache.json")
         downloadsDir = base.appendingPathComponent("Downloads", isDirectory: true)
         try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
         installedAppIDs = Set(UserDefaults.standard.stringArray(forKey: "istore.installed-app-ids") ?? [])
@@ -277,7 +325,7 @@ final class RepositoryStore: ObservableObject {
         seedCeresifyRepository()
         Task { @MainActor [weak self] in
             await self?.loadCatalogCache()
-            await self?.loadCategoryOrderCache()
+            await self?.loadCategoryCache()
         }
         #if DEBUG
         RepoSource._selfTest()
@@ -325,7 +373,11 @@ final class RepositoryStore: ObservableObject {
     private nonisolated static let pagedAppsMaxPages = 40
 
     private struct PagedCatalogPage: Decodable {
-        struct CategoryEntry: Decodable { let originalName: String? }
+        struct CategoryEntry: Decodable {
+            let originalName: String?
+            let displayName: String?
+            let icon: String?
+        }
         let apps: [RepoApp]
         let total: Int
         let categories: [CategoryEntry]?
@@ -378,10 +430,22 @@ final class RepositoryStore: ObservableObject {
     /// Fetches every page for `category` (`""` = the full "All" list, sorted
     /// newest-first). Also returns the admin's category ranking, present on
     /// every page-1 response regardless of the category filter.
-    private nonisolated static func fetchAllPagedApps(category: String) async throws -> (apps: [RepoApp], categoryOrder: [String]?) {
+    private nonisolated static func fetchAllPagedApps(category: String) async throws -> (apps: [RepoApp], categories: [RepoCategory]?) {
         let first = try await fetchPagedCatalogPage(category: category, page: 1)
         var apps = first.apps
-        let order = first.categories?.compactMap(\.originalName)
+        // `originalName` is the key the API filters on; `displayName` and
+        // `icon` are what the panel wants shown for it. Entries without an
+        // original name cannot be filtered on, so they are dropped.
+        let categories = first.categories?.compactMap { entry -> RepoCategory? in
+            guard let original = entry.originalName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !original.isEmpty else { return nil }
+            let display = entry.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return RepoCategory(
+                originalName: original,
+                displayName: display.flatMap { $0.isEmpty ? nil : $0 } ?? original,
+                iconURL: entry.icon.flatMap(URL.init(string:))
+            )
+        }
 
         let totalPages = first.total > 0
             ? min(Int((Double(first.total) / Double(pagedAppsPageSize)).rounded(.up)), pagedAppsMaxPages)
@@ -402,7 +466,7 @@ final class RepositoryStore: ObservableObject {
                 apps += remaining[page] ?? []
             }
         }
-        return (apps, order)
+        return (apps, categories)
     }
 
     func refresh(_ repo: Repository) async {
@@ -410,13 +474,18 @@ final class RepositoryStore: ObservableObject {
         fetchError[repo.id] = nil
         defer { if loadingRepoID == repo.id { loadingRepoID = nil } }
         do {
-            let (apps, order) = try await Self.fetchAllPagedApps(category: "")
+            let (apps, fetchedCategories) = try await Self.fetchAllPagedApps(category: "")
             catalog[repo.id] = RepoSource(name: repo.name, identifier: nil, iconURL: nil, apps: apps)
             saveCatalogCache()
-            if let order, !order.isEmpty {
-                categoryOrder = order
-                saveCategoryOrderCache()
+            if let fetchedCategories, !fetchedCategories.isEmpty {
+                categories = fetchedCategories
+                saveCategoryCache()
             }
+            // Per-category lists are snapshots of the same panel data. Holding
+            // them past a refresh is what made an edit show up in "All" while
+            // the category it belongs to kept serving the pre-edit list.
+            categoryApps.removeAll()
+            categoryAppsError.removeAll()
         } catch {
             fetchError[repo.id] = error.localizedDescription
         }
@@ -587,19 +656,26 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    private func loadCategoryOrderCache() async {
-        let sourceURL = categoryOrderCacheURL
-        let cached: [String]? = await Task.detached(priority: .utility) {
+    private func loadCategoryCache() async {
+        let sourceURL = categoryCacheURL
+        let cached: [RepoCategory]? = await Task.detached(priority: .utility) {
             guard let data = try? Data(contentsOf: sourceURL) else { return nil }
-            return try? JSONDecoder().decode([String].self, from: data)
+            if let decoded = try? JSONDecoder().decode([RepoCategory].self, from: data) {
+                return decoded
+            }
+            // Builds before category display names existed cached a bare name
+            // list here. Read it rather than discarding it — the next refresh
+            // replaces it with the panel's real display names anyway.
+            guard let names = try? JSONDecoder().decode([String].self, from: data) else { return nil }
+            return names.map { RepoCategory(originalName: $0, displayName: $0, iconURL: nil) }
         }.value
         guard let cached, !cached.isEmpty else { return }
-        categoryOrder = cached
+        categories = cached
     }
 
-    private func saveCategoryOrderCache() {
-        let snapshot = categoryOrder
-        let destination = categoryOrderCacheURL
+    private func saveCategoryCache() {
+        let snapshot = categories
+        let destination = categoryCacheURL
         Task.detached(priority: .utility) {
             guard let data = try? JSONEncoder().encode(snapshot) else { return }
             try? data.write(to: destination, options: .atomic)

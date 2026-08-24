@@ -6,12 +6,21 @@ struct AppsView: View {
     @Environment(\.layoutDirection) private var layoutDirection
     @AppStorage("app.language") private var languageCode = AppLanguage.english.rawValue
 
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var selectedApp: RepoApp?
     @State private var searchText = ""
     @State private var displayedApps: [RepoApp] = []
-    @State private var didInitialRefresh = false
+    @State private var lastRefresh: Date?
     @State private var selectedCategory: String?
     @FocusState private var searchFieldFocused: Bool
+
+    /// How long a fetched catalog is treated as current. The API caches each
+    /// built page for two minutes (`PAGED_TTL`), so re-fetching sooner returns
+    /// the identical payload and only costs bandwidth — matching that window
+    /// means coming back to the app is the slowest an admin-panel edit can
+    /// take to appear, without ever hammering the server.
+    private static let freshnessWindow: TimeInterval = 120
 
     /// How many rows are revealed at a time. Keeps a big catalog from
     /// dumping thousands of rows into the list the instant a fetch
@@ -39,24 +48,25 @@ struct AppsView: View {
         }
     }
 
-    /// Categories that currently have apps, ranked by Ceresify's own admin
-    /// panel order (`repositories.categoryOrder`). Any category present in
-    /// the catalog but missing from that ranking — e.g. brand new, not yet
-    /// filed in the admin panel — falls back to the end, first-seen first.
-    private var categories: [String] {
+    /// The category strip, taken straight from the admin panel: the API has
+    /// already dropped hidden categories, applied every rename, and sorted by
+    /// `CategoryOverride.order`, so the panel alone decides what appears here
+    /// and in what order — including custom categories, which carry no apps
+    /// in the flat catalog and could never be derived from it.
+    ///
+    /// Deriving the strip from the loaded apps is kept only as an offline
+    /// fallback, for a first launch that has a cached catalog but never got
+    /// the category list.
+    private var categories: [RepoCategory] {
+        if !repositories.categories.isEmpty { return repositories.categories }
         var seen = Set<String>()
-        var present: [String] = []
+        var present: [RepoCategory] = []
         for app in allApps {
             guard let category = app.category?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !category.isEmpty, seen.insert(category).inserted else { continue }
-            present.append(category)
+            present.append(RepoCategory(originalName: category, displayName: category, iconURL: nil))
         }
-        let order = repositories.categoryOrder
-        guard !order.isEmpty else { return present }
-        // `uniquingKeysWith` guards against a duplicate name in the server's
-        // ranking ever crashing this instead of just picking one rank for it.
-        let rank = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
-        return present.sorted { (rank[$0] ?? Int.max) < (rank[$1] ?? Int.max) }
+        return present
     }
 
     /// True while the store catalog (or, with a category selected, that
@@ -161,17 +171,18 @@ struct AppsView: View {
                     .allowsHitTesting(false)
                 }
                 .task {
-                    guard !didInitialRefresh else { return }
-                    await refreshAll()
-                    refreshDisplayedApps()
-                    didInitialRefresh = true
+                    await refreshIfStale()
+                }
+                // Returning to the app re-reads the catalog once its freshness
+                // window has lapsed. Without this the store was fetched exactly
+                // once per launch, so an app edited in the admin panel stayed
+                // invisible until the user force-quit iStore.
+                .onChange(of: scenePhase) { phase in
+                    guard phase == .active else { return }
+                    Task { await refreshIfStale() }
                 }
                 .refreshable {
-                    await refreshAll()
-                    if let selectedCategory {
-                        await repositories.refreshCategoryApps(selectedCategory)
-                    }
-                    refreshDisplayedApps()
+                    await refreshIfStale(force: true)
                 }
                 .task(id: searchText) {
                     do {
@@ -213,6 +224,22 @@ struct AppsView: View {
                 Text(repositories.downloadError ?? repositories.installError ?? "")
             }
         }
+    }
+
+    /// Re-reads the catalog when it has gone stale, or unconditionally when
+    /// the user pulled to refresh. The selected category is re-read in the
+    /// same pass: `refresh(_:)` drops the cached per-category lists, so
+    /// without this the visible category would briefly empty out.
+    private func refreshIfStale(force: Bool = false) async {
+        if !force, let lastRefresh, Date.now.timeIntervalSince(lastRefresh) < Self.freshnessWindow {
+            return
+        }
+        await refreshAll()
+        if let selectedCategory {
+            await repositories.refreshCategoryApps(selectedCategory)
+        }
+        refreshDisplayedApps()
+        lastRefresh = .now
     }
 
     private func refreshAll() async {
@@ -287,13 +314,20 @@ struct AppsView: View {
             HStack(spacing: 8) {
                 categoryChip(
                     title: isArabic ? "الكل" : "All",
+                    iconURL: nil,
                     isSelected: selectedCategory == nil
                 ) {
                     selectCategory(nil)
                 }
-                ForEach(categories, id: \.self) { category in
-                    categoryChip(title: category, isSelected: selectedCategory == category) {
-                        selectCategory(selectedCategory == category ? nil : category)
+                ForEach(categories) { category in
+                    categoryChip(
+                        title: category.displayName,
+                        iconURL: category.iconURL,
+                        isSelected: selectedCategory == category.originalName
+                    ) {
+                        selectCategory(
+                            selectedCategory == category.originalName ? nil : category.originalName
+                        )
                     }
                 }
             }
@@ -310,23 +344,38 @@ struct AppsView: View {
         }
     }
 
-    private func categoryChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+    private func categoryChip(title: String,
+                              iconURL: URL?,
+                              isSelected: Bool,
+                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title)
-                .font(T.sans(13, .semibold))
-                .foregroundColor(isSelected ? (T.isDark ? .black : .white) : T.ink)
-                .lineLimit(1)
-                .padding(.horizontal, 14)
-                .frame(height: 34)
-                .background {
-                    if isSelected {
-                        Capsule()
-                            .fill(T.isDark ? Color.white : Color.black)
-                            .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            HStack(spacing: 6) {
+                // Only categories the panel gave an icon draw one; the rest
+                // keep the plain text chip they have always had.
+                if let iconURL {
+                    AsyncImage(url: iconURL) { image in
+                        image.resizable().aspectRatio(contentMode: .fit)
+                    } placeholder: {
+                        Color.clear
                     }
+                    .frame(width: 16, height: 16)
                 }
-                .fClearGlass(in: Capsule(), interactive: true)
-                .scaleEffect(isSelected ? 1.04 : 1.0)
+                Text(title)
+            }
+            .font(T.sans(13, .semibold))
+            .foregroundColor(isSelected ? (T.isDark ? .black : .white) : T.ink)
+            .lineLimit(1)
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .background {
+                if isSelected {
+                    Capsule()
+                        .fill(T.isDark ? Color.white : Color.black)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                }
+            }
+            .fClearGlass(in: Capsule(), interactive: true)
+            .scaleEffect(isSelected ? 1.04 : 1.0)
         }
         .buttonStyle(.plain)
     }
