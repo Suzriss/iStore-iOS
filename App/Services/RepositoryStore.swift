@@ -370,7 +370,7 @@ final class RepositoryStore: ObservableObject {
     /// no-op (and the in-memory catalog cache still hits) once already saved.
     private static let ceresifyRepository = Repository(
         id: UUID(uuidString: "5B1D7C8A-1CE6-4A00-8000-000000000001")!,
-        url: URL(string: "https://dev.ceresify.com/api/repo.json?ch=ahmad")!,
+        url: URL(string: "https://dev.ceresify.com/api/repo.json?ch=check0ver")!,
         name: "Ceresify",
         addedAt: Date(timeIntervalSince1970: 0)
     )
@@ -401,7 +401,7 @@ final class RepositoryStore: ObservableObject {
     private nonisolated static let pagedAppsBaseURL = "https://dev.ceresify.com/api/apps/paged"
     private nonisolated static let pagedAppsPageSize = 500
     /// Safety cap on pages fetched per request — comfortably above the whole
-    /// catalog's current size (~8,500 apps ≈ 18 pages) without an unbounded loop.
+    /// catalog's current size (~10,400 apps ≈ 21 pages) without an unbounded loop.
     private nonisolated static let pagedAppsMaxPages = 40
 
     private struct PagedCatalogPage: Decodable {
@@ -429,7 +429,7 @@ final class RepositoryStore: ObservableObject {
             // `[RepoApp]` decoded straight would throw on the first entry the
             // decoder cannot read — failing the page, then all three retries,
             // then the whole refresh. One odd record would cost the entire
-            // 8,500-app catalog, so entries are skipped individually here the
+            // 10,400-app catalog, so entries are skipped individually here the
             // same way `RepoSource` already skips them in the flat feed.
             apps = (try c.decode([FailableApp].self, forKey: .apps)).compactMap(\.value)
             // `total` stays strict on purpose: it drives how many pages get
@@ -446,8 +446,8 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    /// A full catalog fetch fires this concurrently for every page (~17 requests
-    /// for the current ~8,500-app catalog); with a plain single attempt, one
+    /// A full catalog fetch fires this concurrently for every page (~21 requests
+    /// for the current ~10,400-app catalog); with a plain single attempt, one
     /// flaky page on a real device's network — a timeout, a dropped connection —
     /// throws and, via `withThrowingTaskGroup`, discards every other page that
     /// already succeeded. Retrying transient failures here, per page, is what
@@ -470,7 +470,7 @@ final class RepositoryStore: ObservableObject {
     private nonisolated static func fetchPagedCatalogPageOnce(category: String, page: Int) async throws -> PagedCatalogPage {
         var comps = URLComponents(string: pagedAppsBaseURL)!
         var items = [
-            URLQueryItem(name: "ch", value: "ahmad"),
+            URLQueryItem(name: "ch", value: "check0ver"),
             URLQueryItem(name: "page", value: String(page)),
             URLQueryItem(name: "limit", value: String(pagedAppsPageSize))
         ]
