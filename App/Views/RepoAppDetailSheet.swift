@@ -13,6 +13,7 @@ struct RepoAppDetailSheet: View {
     @State private var isDownloading = false
     @State private var isRepeating = false
     @State private var showReinstallConfirmation = false
+    @State private var showReportSheet = false
 
     var body: some View {
         NavigationStack {
@@ -32,6 +33,7 @@ struct RepoAppDetailSheet: View {
                             shortDivider
                             descriptionSection(description)
                         }
+                        reportSection
                     }
                     // Keep the hero card below the floating back control so the
                     // sheet canvas remains visible at the top on every app.
@@ -48,6 +50,9 @@ struct RepoAppDetailSheet: View {
         .presentationCornerRadius(34)
         .presentationDragIndicator(.hidden)
         .presentationBackground { ForgeBackdrop() }
+        .sheet(isPresented: $showReportSheet) {
+            ReportIssueSheet(app: app)
+        }
         .alert(
             languageCode == AppLanguage.arabic.rawValue ? "تكرار التطبيق" : "Repeat app",
             isPresented: $showReinstallConfirmation
@@ -292,6 +297,36 @@ struct RepoAppDetailSheet: View {
         .fPrimaryActionGlass(in: Capsule())
         .disabled(isDownloading || store.activeInstallID != nil)
         .opacity(isDownloading || store.activeInstallID != nil ? 0.48 : 1)
+    }
+
+    /// Foot of the sheet, mirroring where the App Store keeps the same control:
+    /// out of the way of GET, but present on every app whether or not the
+    /// catalog gave it a description.
+    private var reportSection: some View {
+        VStack(spacing: 0) {
+            shortDivider
+            Button {
+                ForgeInteractionFeedback.playLightHaptic()
+                showReportSheet = true
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "exclamationmark.bubble")
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Text(localized("Report", "إبلاغ"))
+                        .font(T.sans(13, .semibold))
+                }
+                .foregroundColor(T.ink2)
+                .padding(.horizontal, 18)
+                .frame(height: 38)
+                .fClearGlass(in: Capsule(), interactive: true)
+                .background {
+                    Capsule().fill(T.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.05))
+                }
+                .clipShape(Capsule())
+            }
+            .buttonStyle(GlassTactileButtonStyle())
+        }
+        .padding(.bottom, 10)
     }
 
     private var repeatGreen: Color {
