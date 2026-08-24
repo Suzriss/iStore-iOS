@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 /// Apps tab — a compact storefront for apps discovered from connected sources.
 struct AppsView: View {
     @EnvironmentObject private var repositories: RepositoryStore
@@ -7,6 +8,7 @@ struct AppsView: View {
     @AppStorage("app.language") private var languageCode = AppLanguage.english.rawValue
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
 
     @State private var selectedApp: RepoApp?
     @State private var searchText = ""
@@ -111,6 +113,19 @@ struct AppsView: View {
             ZStack {
                 ScrollView {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        // Title, search and the promo strip scroll away; only
+                        // the category chips pin. Keeping all of it pinned the
+                        // way it used to be would nail a 2:1 banner — 179pt on
+                        // a 390pt-wide screen — to the top of every scroll.
+                        titleHeader
+                        searchBar
+                            .padding(.horizontal, T.pad)
+                            .padding(.vertical, 8)
+                        if !repositories.banners.isEmpty {
+                            bannerStrip
+                                .padding(.bottom, 12)
+                        }
+
                         Section {
                             if displayedApps.isEmpty {
                                 if isLoadingCatalog {
@@ -136,12 +151,9 @@ struct AppsView: View {
                             }
                         } header: {
                             VStack(spacing: 0) {
-                                titleHeader
-                                searchBar
-                                    .padding(.horizontal, T.pad)
-                                    .padding(.vertical, 8)
                                 if !categories.isEmpty {
                                     categorySlider
+                                        .padding(.top, 4)
                                         .padding(.bottom, 10)
                                 }
                             }
@@ -306,6 +318,62 @@ struct AppsView: View {
             interactive: true
         )
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: languageCode)
+    }
+
+    /// Promo banners from the panel, above the category chips. A single
+    /// banner renders as one card; several become a swipeable pager with the
+    /// page dots the system draws. Height is derived from the 2:1 artwork the
+    /// panel produces so the card never letterboxes.
+    private var bannerStrip: some View {
+        let banners = repositories.banners
+        return Group {
+            if banners.count == 1, let only = banners.first {
+                bannerCard(only)
+            } else {
+                TabView {
+                    ForEach(banners) { banner in
+                        bannerCard(banner)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .automatic))
+                .frame(height: bannerHeight + 28)
+            }
+        }
+        .padding(.horizontal, T.pad)
+    }
+
+    /// 2:1 artwork, inset by the page padding on both sides.
+    private var bannerHeight: CGFloat {
+        (UIScreen.main.bounds.width - T.pad * 2) / 2
+    }
+
+    private func bannerCard(_ banner: RepoBanner) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        return Button {
+            guard let link = banner.linkURL else { return }
+            openURL(link)
+        } label: {
+            AsyncImage(url: banner.imageURL) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().aspectRatio(contentMode: .fill)
+                case .failure:
+                    // A dead image URL must not leave a blank slab behind.
+                    Color.clear
+                default:
+                    Color.white.opacity(0.05).shimmer()
+                }
+            }
+            .frame(height: bannerHeight)
+            .frame(maxWidth: .infinity)
+            .clipShape(shape)
+            .overlay {
+                shape.stroke(T.rule, lineWidth: AppStroke.hairline)
+            }
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .disabled(banner.linkURL == nil)
     }
 
     private var categorySlider: some View {

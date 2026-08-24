@@ -278,6 +278,18 @@ struct RepoCategory: Codable, Equatable, Hashable, Identifiable, Sendable {
     }
 }
 
+// MARK: - Promo banner (admin panel controlled)
+
+/// One promotional banner from the panel's `Banner` collection. The API only
+/// surfaces active ones, already ordered, on every page-1 response.
+struct RepoBanner: Codable, Equatable, Hashable, Identifiable, Sendable {
+    let id: String
+    let imageURL: URL
+    /// Where tapping the banner should go. Optional — a banner may be purely
+    /// decorative, in which case it is shown but not tappable.
+    let linkURL: URL?
+}
+
 // MARK: - Store
 
 /// Fetches the Ceresify catalog (AltStore-shaped JSON) and downloads an app's
@@ -297,6 +309,11 @@ final class RepositoryStore: ObservableObject {
     /// page-1 response carries the list, already filtered server-side (hidden
     /// categories are gone) and ranked by `CategoryOverride.order`.
     @Published private(set) var categories: [RepoCategory] = []
+
+    /// Active promo banners, in the panel's order. Same page-1 side effect as
+    /// `categories`, and cached so the strip is on screen at launch instead of
+    /// popping in once the first refresh lands.
+    @Published private(set) var banners: [RepoBanner] = []
 
     /// Bundle id of the app currently downloading, if any.
     @Published var activeDownloadID: String?
@@ -318,6 +335,7 @@ final class RepositoryStore: ObservableObject {
     private let indexURL: URL
     private let cacheURL: URL
     private let categoryCacheURL: URL
+    private let bannerCacheURL: URL
     private let downloadsDir: URL
     private var installWatchdogTask: Task<Void, Never>?
 
@@ -330,6 +348,7 @@ final class RepositoryStore: ObservableObject {
         // Deliberately the pre-existing filename: older builds wrote a bare
         // [String] here, and `loadCategoryCache` still migrates that shape.
         categoryCacheURL = base.appendingPathComponent("category-order-cache.json")
+        bannerCacheURL = base.appendingPathComponent("banner-cache.json")
         downloadsDir = base.appendingPathComponent("Downloads", isDirectory: true)
         try? FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
         installedAppIDs = Set(UserDefaults.standard.stringArray(forKey: "istore.installed-app-ids") ?? [])
@@ -338,6 +357,7 @@ final class RepositoryStore: ObservableObject {
         Task { @MainActor [weak self] in
             await self?.loadCatalogCache()
             await self?.loadCategoryCache()
+            await self?.loadBannerCache()
         }
         #if DEBUG
         RepoSource._selfTest()
@@ -390,11 +410,19 @@ final class RepositoryStore: ObservableObject {
             let displayName: String?
             let icon: String?
         }
+        /// The panel calls these banners; the AltStore-shaped feed carries
+        /// them under `news`, which is why the key does not match the name.
+        struct NewsEntry: Decodable {
+            let identifier: String?
+            let imageURL: String?
+            let url: String?
+        }
         let apps: [RepoApp]
         let total: Int
         let categories: [CategoryEntry]?
+        let news: [NewsEntry]?
 
-        private enum CodingKeys: String, CodingKey { case apps, total, categories }
+        private enum CodingKeys: String, CodingKey { case apps, total, categories, news }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -409,6 +437,7 @@ final class RepositoryStore: ObservableObject {
             // the catalog at a single page instead of failing into a retry.
             total = try c.decode(Int.self, forKey: .total)
             categories = try? c.decodeIfPresent([CategoryEntry].self, forKey: .categories)
+            news = try? c.decodeIfPresent([NewsEntry].self, forKey: .news)
         }
 
         private struct FailableApp: Decodable {
@@ -464,7 +493,15 @@ final class RepositoryStore: ObservableObject {
     /// Fetches every page for `category` (`""` = the full "All" list, sorted
     /// newest-first). Also returns the admin's category ranking, present on
     /// every page-1 response regardless of the category filter.
-    private nonisolated static func fetchAllPagedApps(category: String) async throws -> (apps: [RepoApp], categories: [RepoCategory]?) {
+    /// What one catalog fetch yields. `categories` and `banners` ride along on
+    /// the page-1 response, so they arrive for free with the apps.
+    struct CatalogFetch: Sendable {
+        let apps: [RepoApp]
+        let categories: [RepoCategory]?
+        let banners: [RepoBanner]?
+    }
+
+    private nonisolated static func fetchAllPagedApps(category: String) async throws -> CatalogFetch {
         let first = try await fetchPagedCatalogPage(category: category, page: 1)
         var apps = first.apps
         // `originalName` is the key the API filters on; `displayName` and
@@ -478,6 +515,16 @@ final class RepositoryStore: ObservableObject {
                 originalName: original,
                 displayName: display.flatMap { $0.isEmpty ? nil : $0 } ?? original,
                 iconURL: entry.icon.flatMap(URL.init(string:))
+            )
+        }
+        // A banner with no usable image is nothing to show, so it is dropped
+        // rather than rendered as an empty slot in the strip.
+        let banners = first.news?.compactMap { entry -> RepoBanner? in
+            guard let raw = entry.imageURL, let image = URL(string: raw) else { return nil }
+            return RepoBanner(
+                id: entry.identifier ?? raw,
+                imageURL: image,
+                linkURL: entry.url.flatMap(URL.init(string:))
             )
         }
 
@@ -500,7 +547,7 @@ final class RepositoryStore: ObservableObject {
                 apps += remaining[page] ?? []
             }
         }
-        return (apps, categories)
+        return CatalogFetch(apps: apps, categories: categories, banners: banners)
     }
 
     func refresh(_ repo: Repository) async {
@@ -508,12 +555,18 @@ final class RepositoryStore: ObservableObject {
         fetchError[repo.id] = nil
         defer { if loadingRepoID == repo.id { loadingRepoID = nil } }
         do {
-            let (apps, fetchedCategories) = try await Self.fetchAllPagedApps(category: "")
-            catalog[repo.id] = RepoSource(name: repo.name, identifier: nil, iconURL: nil, apps: apps)
+            let fetched = try await Self.fetchAllPagedApps(category: "")
+            catalog[repo.id] = RepoSource(name: repo.name, identifier: nil, iconURL: nil, apps: fetched.apps)
             saveCatalogCache()
-            if let fetchedCategories, !fetchedCategories.isEmpty {
+            if let fetchedCategories = fetched.categories, !fetchedCategories.isEmpty {
                 categories = fetchedCategories
                 saveCategoryCache()
+            }
+            // Banners are replaced wholesale, empty included: pulling the last
+            // active banner in the panel has to clear it from the app too.
+            if let fetchedBanners = fetched.banners {
+                banners = fetchedBanners
+                saveBannerCache()
             }
             // Per-category lists are snapshots of the same panel data. Holding
             // them past a refresh is what made an edit show up in "All" while
@@ -536,8 +589,8 @@ final class RepositoryStore: ObservableObject {
         loadingCategoryApps.insert(category)
         defer { loadingCategoryApps.remove(category) }
         do {
-            let (apps, _) = try await Self.fetchAllPagedApps(category: category)
-            categoryApps[category] = apps
+            let fetched = try await Self.fetchAllPagedApps(category: category)
+            categoryApps[category] = fetched.apps
             categoryAppsError[category] = nil
         } catch {
             categoryAppsError[category] = error.localizedDescription
@@ -705,6 +758,25 @@ final class RepositoryStore: ObservableObject {
         }.value
         guard let cached, !cached.isEmpty else { return }
         categories = cached
+    }
+
+    private func loadBannerCache() async {
+        let sourceURL = bannerCacheURL
+        let cached: [RepoBanner]? = await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: sourceURL) else { return nil }
+            return try? JSONDecoder().decode([RepoBanner].self, from: data)
+        }.value
+        guard let cached, !cached.isEmpty else { return }
+        banners = cached
+    }
+
+    private func saveBannerCache() {
+        let snapshot = banners
+        let destination = bannerCacheURL
+        Task.detached(priority: .utility) {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: destination, options: .atomic)
+        }
     }
 
     private func saveCategoryCache() {

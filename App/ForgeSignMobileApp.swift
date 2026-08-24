@@ -112,7 +112,8 @@ struct ForgeSignMobileApp: App {
     }
 }
 
-/// Root: Apps + Sign + General + About tabs, theme injection + Dynamic Type cap.
+/// Root: Home + Apps + Sign + General + About tabs, theme injection and the
+/// Dynamic Type cap.
 /// The ambient glass backdrop is mounted inside each tab's NavigationStack.
 ///
 /// A custom bottom bar instead of native `TabView`/`tabItem` chrome: a
@@ -142,6 +143,7 @@ private struct ForgeRootView: View {
     }
 
     private static let tabs: [TabSpec] = [
+        TabSpec(icon: "house", filledIcon: "house.fill", english: "Home", arabic: "الرئيسية"),
         TabSpec(icon: "square.grid.2x2", filledIcon: "square.grid.2x2.fill", english: "Apps", arabic: "التطبيقات"),
         TabSpec(icon: "signature", filledIcon: "signature", english: "Sign", arabic: "توقيع"),
         TabSpec(icon: "globe", filledIcon: "globe", english: "General", arabic: "عام"),
@@ -151,22 +153,26 @@ private struct ForgeRootView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             ZStack {
-                AppsView()
+                HomeView()
                     .opacity(tab == 0 ? 1 : 0)
                     .allowsHitTesting(tab == 0)
                     .accessibilityHidden(tab != 0)
-                ContentView()
+                AppsView()
                     .opacity(tab == 1 ? 1 : 0)
                     .allowsHitTesting(tab == 1)
                     .accessibilityHidden(tab != 1)
-                GeneralView()
+                ContentView()
                     .opacity(tab == 2 ? 1 : 0)
                     .allowsHitTesting(tab == 2)
                     .accessibilityHidden(tab != 2)
-                AboutView()
+                GeneralView()
                     .opacity(tab == 3 ? 1 : 0)
                     .allowsHitTesting(tab == 3)
                     .accessibilityHidden(tab != 3)
+                AboutView()
+                    .opacity(tab == 4 ? 1 : 0)
+                    .allowsHitTesting(tab == 4)
+                    .accessibilityHidden(tab != 4)
             }
             // Screens cross-fade into each other instead of cutting instantly.
             .animation(.easeInOut(duration: 0.22), value: tab)
@@ -223,7 +229,12 @@ private struct ForgeRootView: View {
                     .frame(height: 22)
                     .scaleEffect(isActive ? 1.1 : 1.0)
                 Text(title)
-                    .font(.system(size: 10.5, weight: .semibold))
+                    // Five tabs instead of four leaves each one narrower, so
+                    // the longest Arabic label ("التطبيقات") needs the smaller
+                    // size and a scale-down rather than truncating.
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
             .foregroundColor(isActive ? theme.accent : theme.ink3)
             .frame(maxWidth: .infinity)
