@@ -265,16 +265,26 @@ struct AppsView: View {
     }
 
     /// Re-reads the catalog when it has gone stale, or unconditionally when
-    /// the user pulled to refresh. The selected category needs no second call
-    /// here: a successful `refresh(_:)` drops the cached per-category lists,
-    /// and `pendingCategory` turns that straight into a re-fetch — which also
-    /// keeps this from racing the view's own category task.
+    /// the user pulled to refresh.
+    ///
+    /// The selected category is re-read explicitly, and must be. Relying on
+    /// `pendingCategory` alone was wrong: it only fires when the cached list
+    /// goes from present to absent, so a category whose fetch had *failed*
+    /// had nothing to drop, kept the same key, and never re-fetched — pull to
+    /// refresh, the obvious thing to try, did nothing at all and only
+    /// relaunching the app cleared it. This call is safe next to the view's
+    /// own task because `fetchCategoryApps` joins a fetch already in flight
+    /// instead of starting a second one.
     private func refreshIfStale(force: Bool = false) async {
         if !force, let lastRefresh, Date.now.timeIntervalSince(lastRefresh) < Self.freshnessWindow {
             return
         }
         await refreshAll()
         lastRefresh = .now
+        repositories.invalidateCategoryApps(keeping: selectedCategory)
+        if let selectedCategory {
+            await repositories.refreshCategoryApps(selectedCategory)
+        }
     }
 
     private func refreshAll() async {

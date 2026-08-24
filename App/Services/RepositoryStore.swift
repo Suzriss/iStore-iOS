@@ -504,7 +504,7 @@ final class RepositoryStore: ObservableObject {
     private nonisolated static func fetchAllPagedApps(category: String) async throws -> CatalogFetch {
         let (first, remainingPages) = try await fetchFirstPagedApps(category: category)
         guard !remainingPages.isEmpty else { return first }
-        let rest = try await fetchRemainingPagedApps(category: category, pages: remainingPages)
+        let rest = await fetchRemainingPagedApps(category: category, pages: remainingPages)
         return CatalogFetch(apps: first.apps + rest, categories: first.categories, banners: first.banners)
     }
 
@@ -553,20 +553,26 @@ final class RepositoryStore: ObservableObject {
     }
 
     /// Pages 2…n, fetched concurrently and concatenated back in page order.
+    ///
+    /// A page that still fails after its three retries is skipped rather than
+    /// thrown: these run as one task group, so rethrowing discarded every page
+    /// that had already succeeded — one flaky request out of the thirteen the
+    /// largest category needs would cost the whole tail of the list. Page 1 is
+    /// the one that genuinely matters, and it is fetched separately above.
     private nonisolated static func fetchRemainingPagedApps(
         category: String,
         pages: Range<Int>
-    ) async throws -> [RepoApp] {
+    ) async -> [RepoApp] {
         guard !pages.isEmpty else { return [] }
-        let collected = try await withThrowingTaskGroup(of: (Int, [RepoApp]).self) { group -> [Int: [RepoApp]] in
+        let collected = await withTaskGroup(of: (Int, [RepoApp]).self) { group -> [Int: [RepoApp]] in
             for page in pages {
                 group.addTask {
-                    let result = try await fetchPagedCatalogPage(category: category, page: page)
-                    return (page, result.apps)
+                    let result = try? await fetchPagedCatalogPage(category: category, page: page)
+                    return (page, result?.apps ?? [])
                 }
             }
             var collected: [Int: [RepoApp]] = [:]
-            for try await (page, pageApps) in group { collected[page] = pageApps }
+            for await (page, pageApps) in group { collected[page] = pageApps }
             return collected
         }
         return pages.flatMap { collected[$0] ?? [] }
@@ -590,11 +596,14 @@ final class RepositoryStore: ObservableObject {
                 banners = fetchedBanners
                 saveBannerCache()
             }
-            // Per-category lists are snapshots of the same panel data. Holding
-            // them past a refresh is what made an edit show up in "All" while
-            // the category it belongs to kept serving the pre-edit list.
-            categoryApps.removeAll()
-            categoryAppsError.removeAll()
+            // Per-category lists are snapshots of the same panel data and are
+            // stale once this lands, but they are NOT dropped here: wiping the
+            // category the user is looking at emptied the screen for as long
+            // as its re-fetch took — thirteen pages for the largest one — and
+            // that happens on every foreground past the freshness window, not
+            // just on an explicit pull. The Apps tab calls
+            // `invalidateCategoryApps(keeping:)` instead, which drops the ones
+            // nobody is looking at and re-reads the visible one in place.
         } catch {
             fetchError[repo.id] = error.localizedDescription
         }
@@ -607,6 +616,19 @@ final class RepositoryStore: ObservableObject {
     /// The fetch currently running for each category, so a second caller
     /// joins it instead of being turned away empty-handed.
     private var categoryTasks: [String: Task<Void, Never>] = [:]
+
+    /// Drops every cached per-category list except `keeping`, so each one is
+    /// re-read the next time it is opened. The kept category is the one on
+    /// screen: the caller re-reads it in place via `refreshCategoryApps`, so
+    /// its rows stay put instead of blanking out for the length of a fetch.
+    func invalidateCategoryApps(keeping survivor: String?) {
+        if let survivor, let kept = categoryApps[survivor] {
+            categoryApps = [survivor: kept]
+        } else {
+            categoryApps.removeAll()
+        }
+        categoryAppsError.removeAll()
+    }
 
     /// Loads `category` unless its list is already cached.
     func loadCategoryApps(_ category: String) async {
@@ -650,7 +672,7 @@ final class RepositoryStore: ObservableObject {
                 self?.categoryApps[category] = first.apps
                 self?.categoryAppsError[category] = nil
                 guard !remainingPages.isEmpty else { return }
-                let rest = try await RepositoryStore.fetchRemainingPagedApps(
+                let rest = await RepositoryStore.fetchRemainingPagedApps(
                     category: category,
                     pages: remainingPages
                 )
