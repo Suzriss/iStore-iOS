@@ -112,6 +112,8 @@ extern "C" int forgesign_sign_ipa(const char* ipaPath,
                                   const char* tempFolder,
                                   int removeExtensions,
                                   int enableDocuments,
+                                  const char* dylibPath,
+                                  int injectExtensions,
                                   char* msgBuf,
                                   int msgBufLen,
                                   char* bundleIdBuf,
@@ -272,10 +274,15 @@ extern "C" int forgesign_sign_ipa(const char* ipaPath,
     bundle.m_bRemoveExtensions = (removeExtensions != 0);
     bundle.m_bRemoveWatchApp = false;
     bundle.m_bRemoveUISupportedDevices = false;
-    bundle.m_bInjectExtensions = false;
+    bundle.m_bInjectExtensions = (injectExtensions != 0);
 
     vector<string> arrDylibs;
     vector<string> arrRemoveDylibs;
+    // zsign copies the dylib into the bundle and rewrites the load commands as
+    // part of signing, so a separate extract/repack pass is unnecessary.
+    if (dylibPath && *dylibPath) {
+        arrDylibs.push_back(dylibPath);
+    }
     bool bRet = bundle.SignFolder(&zsa, strFolder, strBundleId, "", "",
                                   arrDylibs, arrRemoveDylibs,
                                   true,   // force
